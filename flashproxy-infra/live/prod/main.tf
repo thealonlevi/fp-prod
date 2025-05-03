@@ -3,14 +3,14 @@
 ########################################
 
 ###############################################################################
-#  1. Network (VPC, subnets, IGW/NAT, etc.)
+#  1. Network
 ###############################################################################
 module "network" {
   source = "./modules/network"
 }
 
 ###############################################################################
-#  2. EKS cluster + managed node group
+#  2. EKS cluster
 ###############################################################################
 module "eks" {
   source             = "./modules/eks"
@@ -29,20 +29,17 @@ module "gateway" {
   namespace     = "gateway"
   gateway_image = var.gateway_image
 
-  #
-  # Use the aliased Kubernetes provider that points to EKS
-  #
+  # Use the aliased provider
   providers = {
-    kubernetes = kubernetes.eks
+    kubernetes = kubernetes.eks   # <- points to the EKS endpoint
   }
 
-  depends_on = [module.eks]   # ensure control plane exists
+  depends_on = [module.eks]
 }
 
 ###############################################################################
-#  Optional handy outputs
+#  Optional output once gateway module exports it
 ###############################################################################
-# Uncomment after modules/gateway exports gateway_nlb_dns
 # output "gateway_nlb_dns" {
 #   description = "Public DNS name of the gateway Network Load Balancer"
 #   value       = module.gateway.gateway_nlb_dns
