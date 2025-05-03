@@ -18,7 +18,7 @@ terraform {
 }
 
 ###############################################################################
-#  AWS provider
+#  AWS provider (shared by all modules)
 ###############################################################################
 provider "aws" {
   region  = "eu-central-1"
@@ -26,24 +26,21 @@ provider "aws" {
 }
 
 ###############################################################################
-#  Live EKS cluster data (for providers below)
+#  Live EKS cluster data (for kubernetes & helm providers)
 ###############################################################################
 data "aws_eks_cluster" "eks" {
   name       = var.cluster_name
-  depends_on = [module.eks]
-}
-
-data "aws_eks_cluster_auth" "eks" {
-  name       = var.cluster_name
-  depends_on = [module.eks]
+  depends_on = [module.eks]        # wait until cluster exists
 }
 
 ###############################################################################
-#  Default Kubernetes provider  → keeps old state happy
+#  ── Default Kubernetes provider (used by legacy resources) ────────────────
 ###############################################################################
 provider "kubernetes" {
   host                   = data.aws_eks_cluster.eks.endpoint
-  cluster_ca_certificate = base64decode(data.aws_eks_cluster.eks.certificate_authority[0].data)
+  cluster_ca_certificate = base64decode(
+    data.aws_eks_cluster.eks.certificate_authority[0].data
+  )
 
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
@@ -58,12 +55,14 @@ provider "kubernetes" {
 }
 
 ###############################################################################
-#  Aliased Kubernetes provider  → used by the gateway module
+#  ── Aliased provider (kubernetes.eks) – injected into gateway module ──────
 ###############################################################################
 provider "kubernetes" {
-  alias                  = "eks"   # <── aliased name
+  alias                  = "eks"   #  ← alias name
   host                   = data.aws_eks_cluster.eks.endpoint
-  cluster_ca_certificate = base64decode(data.aws_eks_cluster.eks.certificate_authority[0].data)
+  cluster_ca_certificate = base64decode(
+    data.aws_eks_cluster.eks.certificate_authority[0].data
+  )
 
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
@@ -83,7 +82,9 @@ provider "kubernetes" {
 provider "helm" {
   kubernetes {
     host                   = data.aws_eks_cluster.eks.endpoint
-    cluster_ca_certificate = base64decode(data.aws_eks_cluster.eks.certificate_authority[0].data)
+    cluster_ca_certificate = base64decode(
+      data.aws_eks_cluster.eks.certificate_authority[0].data
+    )
 
     exec {
       api_version = "client.authentication.k8s.io/v1beta1"

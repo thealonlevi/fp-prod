@@ -3,7 +3,7 @@
 ########################################
 
 ###############################################################################
-#  1. Network
+#  1. Network (VPC, subnets, IGW/NAT, etc.)
 ###############################################################################
 module "network" {
   source = "./modules/network"
@@ -22,23 +22,23 @@ module "eks" {
 }
 
 ###############################################################################
-#  3. Gateway (Deployment + Service + HPA)
+#  3. Gateway (Kubernetes Deployment + Service + HPA)
 ###############################################################################
 module "gateway" {
   source        = "./modules/gateway"
   namespace     = "gateway"
   gateway_image = var.gateway_image
 
-  # Use the aliased provider
+  # use the aliased provider that points to EKS
   providers = {
-    kubernetes = kubernetes.eks   # <- points to the EKS endpoint
+    kubernetes = kubernetes.eks
   }
 
-  depends_on = [module.eks]
+  depends_on = [module.eks]   # ensure control-plane exists before creating K8s objects
 }
 
 ###############################################################################
-#  Optional output once gateway module exports it
+#  Optional output (uncomment when module exports it)
 ###############################################################################
 # output "gateway_nlb_dns" {
 #   description = "Public DNS name of the gateway Network Load Balancer"
