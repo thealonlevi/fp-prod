@@ -35,14 +35,14 @@ module "eks" {
   vpc_id     = var.vpc_id
   subnet_ids = var.private_subnet_ids
 
-  ## Public API for Terraform/Helm (tighten later)
+  # Expose API publicly for Terraform/Helm; tighten later
   cluster_endpoint_public_access       = true
   cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
 
-  ## Cluster-creator gets admin RBAC
+  # Creator gets cluster-admin RBAC
   enable_cluster_creator_admin_permissions = true
 
-  ## IRSA (service-account → IAM)
+  # IRSA
   enable_irsa = true
 
   eks_managed_node_groups = {
@@ -53,7 +53,7 @@ module "eks" {
       instance_types = ["c7g.large"]
       ami_type       = "AL2023_ARM_64_STANDARD"   # Graviton / Arm64
 
-      # 👇 NEW: grant every node read-only pull access to private ECR
+      # Give every node ECR read-only pull rights
       iam_role_additional_policies = {
         ecr = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
       }
@@ -116,7 +116,7 @@ provider "helm" {
 }
 
 ########################################
-#  Install AWS Load Balancer Controller#
+#  Install AWS Load Balancer Controller
 ########################################
 resource "helm_release" "aws_lb_controller" {
   name       = "aws-load-balancer-controller"
@@ -125,9 +125,21 @@ resource "helm_release" "aws_lb_controller" {
   namespace  = "kube-system"
   version    = "1.9.0"
 
-  set { name = "clusterName"              value = var.cluster_name }
-  set { name = "serviceAccount.create"    value = "true" }
-  set { name = "serviceAccount.name"      value = "aws-load-balancer-controller" }
+  set {
+    name  = "clusterName"
+    value = var.cluster_name
+  }
+
+  set {
+    name  = "serviceAccount.create"
+    value = "true"
+  }
+
+  set {
+    name  = "serviceAccount.name"
+    value = "aws-load-balancer-controller"
+  }
+
   set {
     name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
     value = aws_iam_role.lb_controller.arn
