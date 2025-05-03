@@ -42,7 +42,6 @@ data "aws_eks_cluster_auth" "eks" {
 #  Kubernetes provider bound to EKS  (alias = "eks")
 ###############################################################################
 provider "kubernetes" {
-  alias                  = "eks"                # << important
   host                   = data.aws_eks_cluster.eks.endpoint
   cluster_ca_certificate = base64decode(data.aws_eks_cluster.eks.certificate_authority[0].data)
 
