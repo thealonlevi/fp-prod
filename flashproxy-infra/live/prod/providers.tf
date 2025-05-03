@@ -7,8 +7,7 @@ terraform {
     key            = "prod/terraform.tfstate"
     region         = "eu-central-1"
     dynamodb_table = "fp-prod-tf-locks"
-    # profile line removed → the EC2 instance-profile (or your local
-    # AWS creds) will be used automatically
+    profile        = "fp-prod"   # ← use fp-prod profile to read/write state
   }
 
   required_providers {
@@ -22,16 +21,16 @@ terraform {
 #  AWS provider (shared by all modules)
 ###############################################################################
 provider "aws" {
-  region = "eu-central-1"
-  # no profile → uses instance-role on the runner or your local env vars
+  region  = "eu-central-1"
+  profile = "fp-prod"           # ← all AWS calls use this profile
 }
 
 ###############################################################################
-#  Live EKS cluster details (for providers below)
+#  Live EKS cluster details
 ###############################################################################
 data "aws_eks_cluster" "eks" {
   name       = var.cluster_name
-  depends_on = [module.eks]   # wait until the cluster exists
+  depends_on = [module.eks]
 }
 
 data "aws_eks_cluster_auth" "eks" {
@@ -40,13 +39,12 @@ data "aws_eks_cluster_auth" "eks" {
 }
 
 ###############################################################################
-#  Kubernetes provider wired straight to EKS
+#  Kubernetes provider – token via aws eks get-token --profile fp-prod
 ###############################################################################
 provider "kubernetes" {
   host                   = data.aws_eks_cluster.eks.endpoint
   cluster_ca_certificate = base64decode(data.aws_eks_cluster.eks.certificate_authority[0].data)
 
-  # obtain a fresh auth token for every call via the AWS CLI exec plugin
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
     command     = "aws"
@@ -54,13 +52,14 @@ provider "kubernetes" {
       "eks",
       "get-token",
       "--cluster-name", var.cluster_name,
-      "--region",       "eu-central-1"
+      "--region",       "eu-central-1",
+      "--profile",      "fp-prod"          # ← explicit profile
     ]
   }
 }
 
 ###############################################################################
-#  Helm provider (inherits the same EKS connection)
+#  Helm provider – reuses same exec profile
 ###############################################################################
 provider "helm" {
   kubernetes {
@@ -74,7 +73,8 @@ provider "helm" {
         "eks",
         "get-token",
         "--cluster-name", var.cluster_name,
-        "--region",       "eu-central-1"
+        "--region",       "eu-central-1",
+        "--profile",      "fp-prod"        # ← explicit profile
       ]
     }
   }
