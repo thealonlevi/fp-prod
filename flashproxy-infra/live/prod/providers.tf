@@ -7,7 +7,7 @@ terraform {
     key            = "prod/terraform.tfstate"
     region         = "eu-central-1"
     dynamodb_table = "fp-prod-tf-locks"
-    profile        = "fp-prod"   # ← use fp-prod profile to read/write state
+    profile        = "fp-prod"               # backend uses fp-prod profile
   }
 
   required_providers {
@@ -22,11 +22,11 @@ terraform {
 ###############################################################################
 provider "aws" {
   region  = "eu-central-1"
-  profile = "fp-prod"           # ← all AWS calls use this profile
+  profile = "fp-prod"
 }
 
 ###############################################################################
-#  Live EKS cluster details
+#  Live EKS cluster details (needed by providers)
 ###############################################################################
 data "aws_eks_cluster" "eks" {
   name       = var.cluster_name
@@ -39,9 +39,10 @@ data "aws_eks_cluster_auth" "eks" {
 }
 
 ###############################################################################
-#  Kubernetes provider – token via aws eks get-token --profile fp-prod
+#  Kubernetes provider bound to EKS  (alias = "eks")
 ###############################################################################
 provider "kubernetes" {
+  alias                  = "eks"                # << important
   host                   = data.aws_eks_cluster.eks.endpoint
   cluster_ca_certificate = base64decode(data.aws_eks_cluster.eks.certificate_authority[0].data)
 
@@ -49,17 +50,16 @@ provider "kubernetes" {
     api_version = "client.authentication.k8s.io/v1beta1"
     command     = "aws"
     args = [
-      "eks",
-      "get-token",
+      "eks", "get-token",
       "--cluster-name", var.cluster_name,
       "--region",       "eu-central-1",
-      "--profile",      "fp-prod"          # ← explicit profile
+      "--profile",      "fp-prod"
     ]
   }
 }
 
 ###############################################################################
-#  Helm provider – reuses same exec profile
+#  Helm provider (uses same exec profile)
 ###############################################################################
 provider "helm" {
   kubernetes {
@@ -70,11 +70,10 @@ provider "helm" {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "aws"
       args = [
-        "eks",
-        "get-token",
+        "eks", "get-token",
         "--cluster-name", var.cluster_name,
         "--region",       "eu-central-1",
-        "--profile",      "fp-prod"        # ← explicit profile
+        "--profile",      "fp-prod"
       ]
     }
   }
