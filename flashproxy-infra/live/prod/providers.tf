@@ -7,7 +7,8 @@ terraform {
     key            = "prod/terraform.tfstate"
     region         = "eu-central-1"
     dynamodb_table = "fp-prod-tf-locks"
-    profile        = "fp-prod"
+    # profile line removed → the EC2 instance-profile (or your local
+    # AWS creds) will be used automatically
   }
 
   required_providers {
@@ -21,12 +22,12 @@ terraform {
 #  AWS provider (shared by all modules)
 ###############################################################################
 provider "aws" {
-  region  = "eu-central-1"
-  profile = "fp-prod"
+  region = "eu-central-1"
+  # no profile → uses instance-role on the runner or your local env vars
 }
 
 ###############################################################################
-#  Data sources — pull live connection info from the EKS cluster
+#  Live EKS cluster details (for providers below)
 ###############################################################################
 data "aws_eks_cluster" "eks" {
   name       = var.cluster_name
@@ -39,10 +40,42 @@ data "aws_eks_cluster_auth" "eks" {
 }
 
 ###############################################################################
-#  Kubernetes provider wired straight to EKS (no local kube-config required)
+#  Kubernetes provider wired straight to EKS
 ###############################################################################
 provider "kubernetes" {
   host                   = data.aws_eks_cluster.eks.endpoint
   cluster_ca_certificate = base64decode(data.aws_eks_cluster.eks.certificate_authority[0].data)
-  token                  = data.aws_eks_cluster_auth.eks.token
+
+  # obtain a fresh auth token for every call via the AWS CLI exec plugin
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args = [
+      "eks",
+      "get-token",
+      "--cluster-name", var.cluster_name,
+      "--region",       "eu-central-1"
+    ]
+  }
+}
+
+###############################################################################
+#  Helm provider (inherits the same EKS connection)
+###############################################################################
+provider "helm" {
+  kubernetes {
+    host                   = data.aws_eks_cluster.eks.endpoint
+    cluster_ca_certificate = base64decode(data.aws_eks_cluster.eks.certificate_authority[0].data)
+
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args = [
+        "eks",
+        "get-token",
+        "--cluster-name", var.cluster_name,
+        "--region",       "eu-central-1"
+      ]
+    }
+  }
 }
