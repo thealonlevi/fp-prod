@@ -1,29 +1,13 @@
 ########################################
 #  Input variables                      #
 ########################################
-variable "cluster_name" {
-  description = "EKS cluster name"
-  type        = string
-}
-
-variable "eks_version" {
-  description = "Kubernetes version"
-  type        = string
-  default     = "1.30"
-}
-
-variable "vpc_id" {
-  description = "VPC ID in which to create the cluster"
-  type        = string
-}
-
-variable "private_subnet_ids" {
-  description = "List of private subnet IDs for the node group"
-  type        = list(string)
-}
+variable "cluster_name"        { description = "EKS cluster name";      type = string }
+variable "eks_version"         { description = "Kubernetes version";    type = string; default = "1.30" }
+variable "vpc_id"              { description = "VPC ID";               type = string }
+variable "private_subnet_ids"  { description = "Private subnet IDs";    type = list(string) }
 
 ########################################
-#  EKS control-plane + node group      #
+#  EKS control-plane + node group
 ########################################
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
@@ -35,14 +19,10 @@ module "eks" {
   vpc_id     = var.vpc_id
   subnet_ids = var.private_subnet_ids
 
-  # Expose API publicly for Terraform/Helm; tighten later
   cluster_endpoint_public_access       = true
   cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
 
-  # Creator gets cluster-admin RBAC
   enable_cluster_creator_admin_permissions = true
-
-  # IRSA
   enable_irsa = true
 
   eks_managed_node_groups = {
@@ -51,9 +31,8 @@ module "eks" {
       min_size       = 2
       max_size       = 6
       instance_types = ["c7g.large"]
-      ami_type       = "AL2023_ARM_64_STANDARD"   # Graviton / Arm64
+      ami_type       = "AL2023_ARM_64_STANDARD"
 
-      # Give every node ECR read-only pull rights
       iam_role_additional_policies = {
         ecr = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
       }
@@ -62,16 +41,13 @@ module "eks" {
 }
 
 ########################################
-#  IAM role for AWS LB Controller      #
+#  IAM role for AWS LB Controller
 ########################################
 data "aws_iam_policy_document" "lb_controller_assume" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
-    principals {
-      type        = "Federated"
-      identifiers = [module.eks.oidc_provider_arn]
-    }
+    principals { type = "Federated" identifiers = [module.eks.oidc_provider_arn] }
 
     condition {
       test     = "StringEquals"
@@ -92,26 +68,15 @@ resource "aws_iam_role_policy_attachment" "lb_controller" {
 }
 
 ########################################
-#  Data sources – wait for cluster     #
+#  Cluster data for Helm provider
 ########################################
-data "aws_eks_cluster" "auth" {
-  name       = module.eks.cluster_name
-  depends_on = [module.eks]
-}
-
-data "aws_eks_cluster_auth" "auth" {
-  name       = module.eks.cluster_name
-  depends_on = [module.eks]
-}
+data "aws_eks_cluster" "auth"  { name = module.eks.cluster_name }
+data "aws_eks_cluster_auth" "auth" { name = module.eks.cluster_name }
 
 ########################################
-#  Helm provider bound to new cluster  #
+#  Helm provider bound directly to EKS
 ########################################
 provider "helm" {
-
-  # 👇 tell Helm *not* to look for ~/.kube/config
-  load_config_file = false
-
   kubernetes {
     host                   = data.aws_eks_cluster.auth.endpoint
     cluster_ca_certificate = base64decode(data.aws_eks_cluster.auth.certificate_authority[0].data)
@@ -149,23 +114,26 @@ resource "helm_release" "aws_lb_controller" {
     value = aws_iam_role.lb_controller.arn
   }
 
-  depends_on = [aws_iam_role_policy_attachment.lb_controller]
+  depends_on = [
+    module.eks,
+    aws_iam_role_policy_attachment.lb_controller
+  ]
 }
 
 ########################################
-#  Outputs                             #
+#  Outputs
 ########################################
 output "cluster_endpoint" {
-  description = "API endpoint for the new EKS cluster"
   value       = module.eks.cluster_endpoint
+  description = "API endpoint"
 }
 
 output "cluster_certificate_authority_data" {
-  description = "Base64-encoded cluster CA"
   value       = module.eks.cluster_certificate_authority_data
+  description = "Base64-encoded cluster CA"
 }
 
 output "oidc_provider_arn" {
-  description = "ARN of the cluster’s OIDC provider"
   value       = module.eks.oidc_provider_arn
+  description = "Cluster OIDC provider ARN"
 }
