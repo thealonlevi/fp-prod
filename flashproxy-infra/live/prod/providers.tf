@@ -7,7 +7,7 @@ terraform {
     key            = "prod/terraform.tfstate"
     region         = "eu-central-1"
     dynamodb_table = "fp-prod-tf-locks"
-    profile        = "fp-prod"
+    profile        = "fp-prod"            # state access via fp-prod profile
   }
 
   required_providers {
@@ -18,7 +18,7 @@ terraform {
 }
 
 ###############################################################################
-#  AWS provider (shared by all modules)
+#  AWS provider (shared by every module)
 ###############################################################################
 provider "aws" {
   region  = "eu-central-1"
@@ -26,21 +26,12 @@ provider "aws" {
 }
 
 ###############################################################################
-#  Live EKS cluster data (for kubernetes & helm providers)
-###############################################################################
-data "aws_eks_cluster" "eks" {
-  name       = var.cluster_name
-  depends_on = [module.eks]        # wait until cluster exists
-}
-
-###############################################################################
-#  ── Default Kubernetes provider (used by legacy resources) ────────────────
+#  ── Single Kubernetes provider wired to the EKS control-plane ──────────────
+#      • Uses outputs from module.eks  → no self-reference / no alias needed
 ###############################################################################
 provider "kubernetes" {
-  host                   = data.aws_eks_cluster.eks.endpoint
-  cluster_ca_certificate = base64decode(
-    data.aws_eks_cluster.eks.certificate_authority[0].data
-  )
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
 
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
@@ -55,36 +46,12 @@ provider "kubernetes" {
 }
 
 ###############################################################################
-#  ── Aliased provider (kubernetes.eks) – injected into gateway module ──────
-###############################################################################
-provider "kubernetes" {
-  alias                  = "eks"   #  ← alias name
-  host                   = data.aws_eks_cluster.eks.endpoint
-  cluster_ca_certificate = base64decode(
-    data.aws_eks_cluster.eks.certificate_authority[0].data
-  )
-
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "aws"
-    args = [
-      "eks", "get-token",
-      "--cluster-name", var.cluster_name,
-      "--region",       "eu-central-1",
-      "--profile",      "fp-prod"
-    ]
-  }
-}
-
-###############################################################################
-#  Helm provider (re-uses the same AWS exec token)
+#  Helm provider – piggybacks on the same exec-based auth
 ###############################################################################
 provider "helm" {
   kubernetes {
-    host                   = data.aws_eks_cluster.eks.endpoint
-    cluster_ca_certificate = base64decode(
-      data.aws_eks_cluster.eks.certificate_authority[0].data
-    )
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
 
     exec {
       api_version = "client.authentication.k8s.io/v1beta1"
