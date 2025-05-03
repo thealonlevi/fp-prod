@@ -1,10 +1,26 @@
 ########################################
 #  Input variables                      #
 ########################################
-variable "cluster_name"        { description = "EKS cluster name";      type = string }
-variable "eks_version"         { description = "Kubernetes version";    type = string; default = "1.30" }
-variable "vpc_id"              { description = "VPC ID";               type = string }
-variable "private_subnet_ids"  { description = "Private subnet IDs";    type = list(string) }
+variable "cluster_name" {
+  description = "EKS cluster name"
+  type        = string
+}
+
+variable "eks_version" {
+  description = "Kubernetes version"
+  type        = string
+  default     = "1.30"
+}
+
+variable "vpc_id" {
+  description = "VPC ID"
+  type        = string
+}
+
+variable "private_subnet_ids" {
+  description = "Private subnet IDs"
+  type        = list(string)
+}
 
 ########################################
 #  EKS control-plane + node group
@@ -47,7 +63,10 @@ data "aws_iam_policy_document" "lb_controller_assume" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
-    principals { type = "Federated" identifiers = [module.eks.oidc_provider_arn] }
+    principals {
+      type        = "Federated"
+      identifiers = [module.eks.oidc_provider_arn]
+    }
 
     condition {
       test     = "StringEquals"
