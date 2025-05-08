@@ -3,7 +3,7 @@
 #########################################
 
 locals {
-  lb_id  = aws_lb.sdk_nlb.arn_suffix           # net/sdk-nlb/…
+  lb_id  = aws_lb.sdk_nlb.arn_suffix
   tg_id  = aws_lb_target_group.sdk_tg.arn_suffix
   asg_id = aws_autoscaling_group.sdk_asg.name
 }
@@ -29,7 +29,10 @@ resource "aws_cloudwatch_metric_alarm" "flows_per_instance_math" {
     }
   }
 
-  metric_query { id = "flows" expression = "FILL(raw_flows, 0)" }
+  metric_query {
+    id         = "flows"
+    expression = "FILL(raw_flows, 0)"
+  }
 
   metric_query {
     id = "raw_hosts"
@@ -45,7 +48,10 @@ resource "aws_cloudwatch_metric_alarm" "flows_per_instance_math" {
     }
   }
 
-  metric_query { id = "hosts" expression = "FILL(raw_hosts, 1)" }
+  metric_query {
+    id         = "hosts"
+    expression = "FILL(raw_hosts, 1)"
+  }
 
   metric_query {
     id          = "fpi"
@@ -96,25 +102,40 @@ resource "aws_cloudwatch_metric_alarm" "high_flows" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_autoscaling_policy.scale_out.arn]
 
-  metric_query { id = "raw_flows" metric {
+  metric_query {
+    id = "raw_flows"
+    metric {
       namespace   = "AWS/NetworkELB"
       metric_name = "ActiveFlowCount"
       period      = 60
       stat        = "Sum"
-      dimensions  = { LoadBalancer = local.lb_id } } }
+      dimensions  = { LoadBalancer = local.lb_id }
+    }
+  }
 
-  metric_query { id = "flows" expression = "FILL(raw_flows, 0)" }
+  metric_query {
+    id         = "flows"
+    expression = "FILL(raw_flows, 0)"
+  }
 
-  metric_query { id = "raw_hosts" metric {
+  metric_query {
+    id = "raw_hosts"
+    metric {
       namespace   = "AWS/NetworkELB"
       metric_name = "HealthyHostCount"
       period      = 60
       stat        = "Average"
       dimensions  = {
         LoadBalancer = local.lb_id
-        TargetGroup  = local.tg_id } } }
+        TargetGroup  = local.tg_id
+      }
+    }
+  }
 
-  metric_query { id = "hosts" expression = "FILL(raw_hosts, 1)" }
+  metric_query {
+    id         = "hosts"
+    expression = "FILL(raw_hosts, 1)"
+  }
 
   metric_query {
     id          = "fpi"
@@ -125,36 +146,51 @@ resource "aws_cloudwatch_metric_alarm" "high_flows" {
 }
 
 ############################
-# 3b. Low-flow alarm (12-min window)
+# 3b. Low-flow alarm (12 min)
 ############################
 resource "aws_cloudwatch_metric_alarm" "low_flows" {
   alarm_name          = "sdk-gw-LowFlows"
-  evaluation_periods  = 12         # 12 × 60 s = 12 min
+  evaluation_periods  = 12      # 12 × 60 s = 12 min
   datapoints_to_alarm = 12
   threshold           = 50
   comparison_operator = "LessThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_autoscaling_policy.scale_in.arn]
 
-  metric_query { id = "raw_flows" metric {
+  metric_query {
+    id = "raw_flows"
+    metric {
       namespace   = "AWS/NetworkELB"
       metric_name = "ActiveFlowCount"
       period      = 60
       stat        = "Sum"
-      dimensions  = { LoadBalancer = local.lb_id } } }
+      dimensions  = { LoadBalancer = local.lb_id }
+    }
+  }
 
-  metric_query { id = "flows" expression = "FILL(raw_flows, 0)" }
+  metric_query {
+    id         = "flows"
+    expression = "FILL(raw_flows, 0)"
+  }
 
-  metric_query { id = "raw_hosts" metric {
+  metric_query {
+    id = "raw_hosts"
+    metric {
       namespace   = "AWS/NetworkELB"
       metric_name = "HealthyHostCount"
       period      = 60
       stat        = "Average"
       dimensions  = {
         LoadBalancer = local.lb_id
-        TargetGroup  = local.tg_id } } }
+        TargetGroup  = local.tg_id
+      }
+    }
+  }
 
-  metric_query { id = "hosts" expression = "FILL(raw_hosts, 1)" }
+  metric_query {
+    id         = "hosts"
+    expression = "FILL(raw_hosts, 1)"
+  }
 
   metric_query {
     id          = "fpi"
