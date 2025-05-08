@@ -1,5 +1,6 @@
 #################################
-# main.tf – sdk-gateway (revised)
+# main.tf – sdk-gateway (final)
+# • Adds 10-min warm-up + 25-min TF timeout
 #################################
 
 #############################
@@ -94,16 +95,11 @@ resource "aws_launch_template" "sdk_lt" {
   instance_type          = var.instance_type
   vpc_security_group_ids = [aws_security_group.sdk_sg.id]
 
-  user_data = base64encode(
-    templatefile(
-      "${path.module}/userdata.tpl",
-      {
-        gateway_port        = var.gateway_port,
-        sdk_gateway_tag     = var.sdk_gateway_tag,
-        sdk_server_endpoint = "${data.aws_lb.sdk_server.dns_name}:9090"
-      }
-    )
-  )
+  user_data = base64encode(templatefile("${path.module}/userdata.tpl", {
+    gateway_port        = var.gateway_port,
+    sdk_gateway_tag     = var.sdk_gateway_tag,
+    sdk_server_endpoint = "${data.aws_lb.sdk_server.dns_name}:9090"
+  }))
 
   lifecycle { create_before_destroy = true }
 }
@@ -113,10 +109,12 @@ resource "aws_launch_template" "sdk_lt" {
 ##########################
 
 resource "aws_autoscaling_group" "sdk_asg" {
-  desired_capacity    = var.instance_count
-  min_size            = 1
-  max_size            = 10
-  vpc_zone_identifier = [aws_subnet.public.id]
+  desired_capacity           = var.instance_count
+  min_size                   = 1
+  max_size                   = 10
+  vpc_zone_identifier        = [aws_subnet.public.id]
+  wait_for_capacity_timeout  = "25m"   # give TF patience
+  default_instance_warmup    = 600     # 10-min metric warm-up
 
   launch_template {
     id      = aws_launch_template.sdk_lt.id
