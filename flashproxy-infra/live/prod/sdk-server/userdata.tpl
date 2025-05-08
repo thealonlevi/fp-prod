@@ -2,12 +2,12 @@
 # ---------- sdk-server build-at-boot ----------
 set -euo pipefail
 
-PORT=${server_port}
-TAG=${sdk_server_tag}
+PORT=${server_port}        # Terraform var → literal number (e.g. 9090)
+TAG=${sdk_server_tag}      # Terraform var → Git tag
 
 echo "[boot] installing Go tool-chain…"
 GO_VER=1.22.4
-curl -sL "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz" -o /tmp/go.tgz
+curl -sL "https://go.dev/dl/go$${GO_VER}.linux-amd64.tar.gz" -o /tmp/go.tgz
 tar -C /usr/local -xzf /tmp/go.tgz
 export PATH=$PATH:/usr/local/go/bin
 
@@ -15,9 +15,9 @@ export HOME=/root
 export GOCACHE=/root/.cache/go
 mkdir -p "$GOCACHE"
 
-echo "[boot] fetching mock-server tag ${TAG}…"
+echo "[boot] fetching mock-server tag $${TAG}…"
 mkdir -p /opt/sdk
-curl -sL "https://github.com/thealonlevi/mock-server/archive/refs/tags/${TAG}.tar.gz" \
+curl -sL "https://github.com/thealonlevi/mock-server/archive/refs/tags/$${TAG}.tar.gz" \
   | tar -xz -C /opt/sdk --strip-components 1
 
 echo "[boot] building static binary…"
@@ -42,4 +42,4 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now sdk-srv
-echo "[boot] sdk-server ready on :${PORT}"
+echo "[boot] sdk-server ready on :$${PORT}"
