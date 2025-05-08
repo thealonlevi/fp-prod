@@ -37,6 +37,6 @@ variable "sdk_gateway_download_url" {
 variable "sdk_gateway_tag" {
   description = "Git tag (release) to fetch and build, e.g. v0.1.0"
   type        = string
-  default     = "v0.1.0"
+  default     = "v0.1.2"
 }
 
