@@ -24,7 +24,7 @@ data "aws_subnet" "gw_public" {
 # Security Groups      #
 ########################
 
-# Gateway SG (already exists)
+# Existing gateway SG
 data "aws_security_group" "sdk_gw_sg" {
   filter {
     name   = "group-name"
@@ -33,19 +33,18 @@ data "aws_security_group" "sdk_gw_sg" {
   vpc_id = data.aws_vpc.gw_vpc.id
 }
 
-# New server SG – only gateway → 9090 + optional SSH
+# New server SG – only traffic from gateway on 9090 (+ optional SSH)
 resource "aws_security_group" "sdk_srv_sg" {
   name        = "sdk-srv-sg"
   description = "Allow TCP 9090 from sdk-gateway"
   vpc_id      = data.aws_vpc.gw_vpc.id
 
-  # Traffic from gateway tier
   ingress {
-    protocol                = "tcp"
-    from_port               = var.server_port
-    to_port                 = var.server_port
-    security_groups         = [data.aws_security_group.sdk_gw_sg.id]
-    description             = "sdk-gateway → sdk-server"
+    protocol        = "tcp"
+    from_port       = var.server_port
+    to_port         = var.server_port
+    security_groups = [data.aws_security_group.sdk_gw_sg.id]
+    description     = "sdk-gateway to sdk-server"   # ASCII-only
   }
 
   # SSH (optional)
@@ -85,8 +84,8 @@ resource "aws_launch_template" "sdk_srv_lt" {
 
   user_data = base64encode(
     templatefile("${path.module}/userdata.tpl", {
-      server_port     = var.server_port,
-      sdk_server_tag  = var.sdk_server_tag
+      server_port    = var.server_port,
+      sdk_server_tag = var.sdk_server_tag
     })
   )
 
