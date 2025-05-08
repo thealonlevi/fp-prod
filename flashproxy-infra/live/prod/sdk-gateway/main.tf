@@ -46,7 +46,6 @@ resource "aws_security_group" "sdk_sg" {
   description = "Allow inbound TCP 8080"
   vpc_id      = aws_vpc.main.id
 
-  # Public traffic to the gateway listener
   ingress {
     protocol    = "tcp"
     from_port   = var.gateway_port
@@ -54,7 +53,6 @@ resource "aws_security_group" "sdk_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # SSH (optional, tighten in production)
   ingress {
     protocol    = "tcp"
     from_port   = 22
@@ -84,18 +82,10 @@ data "aws_ami" "amazon_linux" {
 }
 
 ##############################################
-# Bring in the sdk-server NLB DNS via remote state
+# Discover sdk-server NLB in the same account
 ##############################################
-# ⚠️  Adjust the backend block to match your state storage.
-#     If sdk-server is in the same state file, remove this and
-#     reference the resource directly.
-data "terraform_remote_state" "sdk_server" {
-  backend = "s3"
-  config = {
-    bucket = "flashproxy-prod-terraform-state"
-    key    = "live/prod/sdk-server/terraform.tfstate"
-    region = var.aws_region
-  }
+data "aws_lb" "sdk_server" {
+  name = "sdk-server-nlb"
 }
 
 resource "aws_launch_template" "sdk_lt" {
@@ -110,8 +100,7 @@ resource "aws_launch_template" "sdk_lt" {
       {
         gateway_port        = var.gateway_port,
         sdk_gateway_tag     = var.sdk_gateway_tag,
-        # compile-time upstream injected via -ldflags
-        sdk_server_endpoint = "${data.terraform_remote_state.sdk_server.outputs.sdk_server_endpoint}:9090"
+        sdk_server_endpoint = "${data.aws_lb.sdk_server.dns_name}:9090"
       }
     )
   )
