@@ -1,0 +1,10 @@
+# Terraform build artifacts
+.terraform/
+*.tfstate
+*.tfstate.*
+# Terraform dependency lock (keep it if you like; most teams commit it)
+# .terraform.lock.hcl
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
