@@ -1,5 +1,6 @@
 #################################
-# main.tf – sdk-server (fmt-ready)
+# main.tf – sdk-server (revised, fmt-clean)
+# • SG now uses name_prefix to avoid duplicate-name error
 #################################
 
 #############################
@@ -24,7 +25,7 @@ data "aws_subnet" "gw_public" {
 # Security Groups      #
 ########################
 
-# Gateway SG (reference only)
+# Reference to gateway SG (unchanged)
 data "aws_security_group" "sdk_gw_sg" {
   filter {
     name   = "group-name"
@@ -33,9 +34,9 @@ data "aws_security_group" "sdk_gw_sg" {
   vpc_id = data.aws_vpc.gw_vpc.id
 }
 
-# New server SG – allow entire VPC on 9090 (+ optional SSH)
+# Server SG — allow entire VPC on 9090 + SSH
 resource "aws_security_group" "sdk_srv_sg" {
-  name        = "sdk-srv-sg"
+  name_prefix = "sdk-srv-"                         # ← replaces fixed name
   description = "Allow TCP 9090 from VPC"
   vpc_id      = data.aws_vpc.gw_vpc.id
 
@@ -43,7 +44,7 @@ resource "aws_security_group" "sdk_srv_sg" {
     protocol    = "tcp"
     from_port   = var.server_port
     to_port     = var.server_port
-    cidr_blocks = ["10.10.0.0/16"]          # VPC CIDR
+    cidr_blocks = ["10.10.0.0/16"]                 # VPC CIDR
     description = "VPC traffic to sdk-server"
   }
 
@@ -82,10 +83,12 @@ resource "aws_launch_template" "sdk_srv_lt" {
   instance_type          = var.instance_type
   vpc_security_group_ids = [aws_security_group.sdk_srv_sg.id]
 
-  user_data = base64encode(templatefile("${path.module}/userdata.tpl", {
-    server_port    = var.server_port,
-    sdk_server_tag = var.sdk_server_tag
-  }))
+  user_data = base64encode(
+    templatefile("${path.module}/userdata.tpl", {
+      server_port    = var.server_port,
+      sdk_server_tag = var.sdk_server_tag
+    })
+  )
 
   lifecycle {
     create_before_destroy = true
