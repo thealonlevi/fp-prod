@@ -1,6 +1,5 @@
 #################################
-# main.tf – sdk-server (revised)
-# • Ingress widened to VPC CIDR so NLB health-checks succeed
+# main.tf – sdk-server (fmt-ready)
 #################################
 
 #############################
@@ -8,11 +7,17 @@
 #############################
 
 data "aws_vpc" "gw_vpc" {
-  filter { name = "tag:Name" values = ["sdk-gw-vpc"] }
+  filter {
+    name   = "tag:Name"
+    values = ["sdk-gw-vpc"]
+  }
 }
 
 data "aws_subnet" "gw_public" {
-  filter { name = "tag:Name" values = ["sdk-gw-public"] }
+  filter {
+    name   = "tag:Name"
+    values = ["sdk-gw-public"]
+  }
 }
 
 ########################
@@ -21,11 +26,14 @@ data "aws_subnet" "gw_public" {
 
 # Gateway SG (reference only)
 data "aws_security_group" "sdk_gw_sg" {
-  filter { name = "group-name" values = ["sdk-gw-sg"] }
+  filter {
+    name   = "group-name"
+    values = ["sdk-gw-sg"]
+  }
   vpc_id = data.aws_vpc.gw_vpc.id
 }
 
-# New server SG – allow VPC CIDR on 9090 (covers NLB + gateways)
+# New server SG – allow entire VPC on 9090 (+ optional SSH)
 resource "aws_security_group" "sdk_srv_sg" {
   name        = "sdk-srv-sg"
   description = "Allow TCP 9090 from VPC"
@@ -35,11 +43,10 @@ resource "aws_security_group" "sdk_srv_sg" {
     protocol    = "tcp"
     from_port   = var.server_port
     to_port     = var.server_port
-    cidr_blocks = ["10.10.0.0/16"]          # entire VPC
+    cidr_blocks = ["10.10.0.0/16"]          # VPC CIDR
     description = "VPC traffic to sdk-server"
   }
 
-  # SSH (optional)
   ingress {
     protocol    = "tcp"
     from_port   = 22
@@ -62,7 +69,11 @@ resource "aws_security_group" "sdk_srv_sg" {
 data "aws_ami" "amazon_linux" {
   most_recent = true
   owners      = ["amazon"]
-  filter { name = "name" values = ["amzn2-ami-hvm-*"] }
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*"]
+  }
 }
 
 resource "aws_launch_template" "sdk_srv_lt" {
@@ -76,7 +87,9 @@ resource "aws_launch_template" "sdk_srv_lt" {
     sdk_server_tag = var.sdk_server_tag
   }))
 
-  lifecycle { create_before_destroy = true }
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 ##########################
@@ -122,7 +135,9 @@ resource "aws_lb_target_group" "sdk_srv_tg" {
   target_type = "instance"
   vpc_id      = data.aws_vpc.gw_vpc.id
 
-  health_check { protocol = "TCP" }
+  health_check {
+    protocol = "TCP"
+  }
 }
 
 resource "aws_lb_listener" "sdk_srv_listener" {
