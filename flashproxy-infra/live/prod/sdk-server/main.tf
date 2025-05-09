@@ -122,6 +122,7 @@ resource "aws_autoscaling_group" "sdk_srv_asg" {
 
 resource "aws_lb" "sdk_srv_nlb" {
   name               = "sdk-server-nlb"
+  internal           = true
   load_balancer_type = "network"
   subnets            = [data.aws_subnet.gw_public.id]
 }
