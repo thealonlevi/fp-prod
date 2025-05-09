@@ -148,9 +148,3 @@ resource "aws_lb_listener" "sdk_srv_listener" {
     target_group_arn = aws_lb_target_group.sdk_srv_tg.arn
   }
 }
-
-########################
-# Outputs              #
-########################
-
-

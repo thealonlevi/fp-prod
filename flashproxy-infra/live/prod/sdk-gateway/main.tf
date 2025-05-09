@@ -151,12 +151,3 @@ resource "aws_lb_listener" "sdk_listener" {
     target_group_arn = aws_lb_target_group.sdk_tg.arn
   }
 }
-
-########################
-# Outputs              #
-########################
-
-output "sdk_gateway_endpoint" {
-  description = "Public DNS name of the gateway NLB"
-  value       = aws_lb.sdk_nlb.dns_name
-}
