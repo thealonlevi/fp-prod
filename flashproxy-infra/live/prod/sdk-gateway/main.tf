@@ -1,41 +1,25 @@
 #################################
-# main.tf – sdk-gateway (final)
-# • Adds 10-min warm-up + 25-min TF timeout
+# main.tf – sdk-gateway (network-layer decoupled)
+# • Assumes VPC & subnet are pre-created by live/prod/network
+# • Keeps warm-up + extended TF timeout
 #################################
 
 #############################
-# Networking ─ VPC & Subnet #
+# Look up shared VPC/Subnet #
 #############################
 
-resource "aws_vpc" "main" {
-  cidr_block           = "10.10.0.0/16"
-  enable_dns_hostnames = true
-  tags = { Name = "sdk-gw-vpc" }
-}
-
-resource "aws_internet_gateway" "gw" {
-  vpc_id = aws_vpc.main.id
-}
-
-resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.10.1.0/24"
-  availability_zone       = var.az
-  map_public_ip_on_launch = true
-  tags = { Name = "sdk-gw-public" }
-}
-
-resource "aws_route_table" "rt" {
-  vpc_id = aws_vpc.main.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.gw.id
+data "aws_vpc" "gw" {
+  filter {
+    name   = "tag:Name"
+    values = ["sdk-gw-vpc"]
   }
 }
 
-resource "aws_route_table_association" "rta" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.rt.id
+data "aws_subnet" "public" {
+  filter {
+    name   = "tag:Name"
+    values = ["sdk-gw-public"]
+  }
 }
 
 ########################
@@ -43,9 +27,9 @@ resource "aws_route_table_association" "rta" {
 ########################
 
 resource "aws_security_group" "sdk_sg" {
-  name        = "sdk-gw-sg"
+  name_prefix = "sdk-gw-"                       # avoid duplicate-name clashes
   description = "Allow inbound TCP 8080"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = data.aws_vpc.gw.id
 
   ingress {
     protocol    = "tcp"
@@ -54,6 +38,7 @@ resource "aws_security_group" "sdk_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # SSH (optional)
   ingress {
     protocol    = "tcp"
     from_port   = 22
@@ -95,13 +80,17 @@ resource "aws_launch_template" "sdk_lt" {
   instance_type          = var.instance_type
   vpc_security_group_ids = [aws_security_group.sdk_sg.id]
 
-  user_data = base64encode(templatefile("${path.module}/userdata.tpl", {
-    gateway_port        = var.gateway_port,
-    sdk_gateway_tag     = var.sdk_gateway_tag,
-    sdk_server_endpoint = "${data.aws_lb.sdk_server.dns_name}:9090"
-  }))
+  user_data = base64encode(
+    templatefile("${path.module}/userdata.tpl", {
+      gateway_port        = var.gateway_port,
+      sdk_gateway_tag     = var.sdk_gateway_tag,
+      sdk_server_endpoint = "${data.aws_lb.sdk_server.dns_name}:9090"
+    })
+  )
 
-  lifecycle { create_before_destroy = true }
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 ##########################
@@ -109,12 +98,12 @@ resource "aws_launch_template" "sdk_lt" {
 ##########################
 
 resource "aws_autoscaling_group" "sdk_asg" {
-  desired_capacity           = var.instance_count
-  min_size                   = 1
-  max_size                   = 10
-  vpc_zone_identifier        = [aws_subnet.public.id]
-  wait_for_capacity_timeout  = "25m"   # give TF patience
-  default_instance_warmup    = 600     # 10-min metric warm-up
+  desired_capacity          = var.instance_count
+  min_size                  = 1
+  max_size                  = 10
+  vpc_zone_identifier       = [data.aws_subnet.public.id]
+  wait_for_capacity_timeout = "25m"
+  default_instance_warmup   = 600   # 10-min warm-up
 
   launch_template {
     id      = aws_launch_template.sdk_lt.id
@@ -139,7 +128,7 @@ resource "aws_autoscaling_group" "sdk_asg" {
 resource "aws_lb" "sdk_nlb" {
   name               = "sdk-nlb"
   load_balancer_type = "network"
-  subnets            = [aws_subnet.public.id]
+  subnets            = [data.aws_subnet.public.id]
 }
 
 resource "aws_lb_target_group" "sdk_tg" {
@@ -147,7 +136,7 @@ resource "aws_lb_target_group" "sdk_tg" {
   port        = var.gateway_port
   protocol    = "TCP"
   target_type = "instance"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = data.aws_vpc.gw.id
 
   health_check { protocol = "TCP" }
 }
@@ -161,4 +150,13 @@ resource "aws_lb_listener" "sdk_listener" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.sdk_tg.arn
   }
+}
+
+########################
+# Outputs              #
+########################
+
+output "sdk_gateway_endpoint" {
+  description = "Public DNS name of the gateway NLB"
+  value       = aws_lb.sdk_nlb.dns_name
 }

@@ -1,6 +1,8 @@
 #################################
-# main.tf – sdk-server (revised, fmt-clean)
-# • SG now uses name_prefix to avoid duplicate-name error
+# main.tf – sdk-server (final clean version)
+# • Uses shared VPC/subnet from live/prod/network
+# • Security-group uses name_prefix (no duplicate errors)
+# • No dependency on the gateway SG
 #################################
 
 #############################
@@ -22,32 +24,24 @@ data "aws_subnet" "gw_public" {
 }
 
 ########################
-# Security Groups      #
+# Security Group       #
 ########################
 
-# Reference to gateway SG (unchanged)
-data "aws_security_group" "sdk_gw_sg" {
-  filter {
-    name   = "group-name"
-    values = ["sdk-gw-sg"]
-  }
-  vpc_id = data.aws_vpc.gw_vpc.id
-}
-
-# Server SG — allow entire VPC on 9090 + SSH
 resource "aws_security_group" "sdk_srv_sg" {
-  name_prefix = "sdk-srv-"                         # ← replaces fixed name
+  name_prefix = "sdk-srv-"                # unique name each apply
   description = "Allow TCP 9090 from VPC"
   vpc_id      = data.aws_vpc.gw_vpc.id
 
+  # App traffic from anywhere inside the VPC (covers NLB + gateways)
   ingress {
     protocol    = "tcp"
     from_port   = var.server_port
     to_port     = var.server_port
-    cidr_blocks = ["10.10.0.0/16"]                 # VPC CIDR
+    cidr_blocks = ["10.10.0.0/16"]        # VPC CIDR
     description = "VPC traffic to sdk-server"
   }
 
+  # Optional SSH for debugging
   ingress {
     protocol    = "tcp"
     from_port   = 22
@@ -55,6 +49,7 @@ resource "aws_security_group" "sdk_srv_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # All egress allowed
   egress {
     protocol    = "-1"
     from_port   = 0
@@ -152,4 +147,13 @@ resource "aws_lb_listener" "sdk_srv_listener" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.sdk_srv_tg.arn
   }
+}
+
+########################
+# Outputs              #
+########################
+
+output "sdk_server_endpoint" {
+  description = "DNS name of the sdk-server Network Load Balancer"
+  value       = aws_lb.sdk_srv_nlb.dns_name
 }
