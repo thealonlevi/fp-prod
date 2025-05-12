@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
-exts={'.tf','.tpl'}
+exts={'.yaml', '.cfg'}
 root=Path(__file__).resolve().parent
 with open('files_dump.log','w',encoding='utf-8') as out:
     for f in sorted(root.rglob('*')):
