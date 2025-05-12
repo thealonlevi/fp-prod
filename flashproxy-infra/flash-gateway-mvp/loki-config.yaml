@@ -1,4 +1,3 @@
-# ───── Minimal single-node Loki configuration ─────
 auth_enabled: false
 
 server:
@@ -6,11 +5,11 @@ server:
   log_level: info
 
 common:
-  path: /loki
+  root_path: /loki          # <- replaces deprecated "path"
   storage:
-    filesystem:
+    filesystem:             # filesystem chunks & index
       chunks_directory: /loki/chunks
-      rules_directory: /loki/rules
+      rules_directory:  /loki/rules
   replication_factor: 1
   ring:
     kvstore:
@@ -18,7 +17,7 @@ common:
 
 schema_config:
   configs:
-    - from: 2020-10-15
+    - from: 2023-01-01
       store: boltdb-shipper
       object_store: filesystem
       schema: v11
