@@ -5,11 +5,9 @@ server:
   log_level: info
 
 common:
-  root_path: /loki          # <- replaces deprecated "path"
   storage:
-    filesystem:             # filesystem chunks & index
-      chunks_directory: /loki/chunks
-      rules_directory:  /loki/rules
+    filesystem:
+      directory: /loki          # ← single authoritative key
   replication_factor: 1
   ring:
     kvstore:
