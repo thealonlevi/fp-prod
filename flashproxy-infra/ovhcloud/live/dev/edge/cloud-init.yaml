@@ -1,31 +1,37 @@
 #cloud-config
 package_update: true
-packages: [docker.io, curl]
+packages: [docker.io, curl, tar]
 
 write_files:
-  - path: /opt/edge/docker-compose.yml
+  ########################################################
+  # Promtail config — scraped by docker‑compose service
+  ########################################################
+  - path: /opt/src/promtail.yaml
+    permissions: '0644'
     content: |
-      version: "3.9"
-      services:
-        haproxy:
-          image: haproxytech/haproxy-alpine:2.9
-          restart: unless-stopped
-          network_mode: host
-          volumes:
-            - /data/cfg/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-        socks:
-          image: maximusou/3proxy               # tiny SOCKS5 shim
-          restart: unless-stopped
-          network_mode: host
-        promtail:
-          image: grafana/promtail
-          network_mode: host
-          volumes:
-            - /var/log:/var/log
-          command: -config.file=/etc/promtail.yaml
+      server:
+        http_listen_port: 0
+      positions:
+        filename: /var/log/positions.yaml
+      clients:
+        - url: http://localhost:3100/loki/api/v1/push
+      scrape_configs:
+        - job_name: flash-edge
+          static_configs:
+            - targets: ['localhost']
+              labels:
+                job: flash-edge
+                __path__: /var/log/*proxy*.log
 
 runcmd:
   - systemctl enable --now docker
-  - git clone --depth 1 https://github.com/YourOrg/flashproxy-infra.git /opt/src
+
+  # ─── Fetch and extract fp‑prod release v0.11 ──────────────────────
+  - mkdir -p /opt/src
+  - curl -L https://github.com/thealonlevi/fp-prod/archive/refs/tags/0.11.tar.gz -o /opt/src/fp-prod-0.11.tar.gz
+  - tar -xzf /opt/src/fp-prod-0.11.tar.gz --strip-components=1 -C /opt/src
+
+  # ─── Start the edge stack (HAProxy, 3proxy, Loki, Grafana, Promtail) ───
   - docker compose -f /opt/src/flashproxy-infra/flash-gateway-mvp/docker-compose.yml up -d
 
+final_message: "🚀 FlashProxy edge ready: HAProxy & observability stack running."

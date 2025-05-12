@@ -13,3 +13,6 @@ project          = "la2032158-ovh"
 # plan_code      = "SYS-LE-1"
 # datacentre     = "de1"
 # ssh_pub_key_path = "${path.root}/../../../ssh/id_rsa.pub"
+
+service_name  = "ns322222.ip-141-95-67.eu"
+ssh_key_name  = "flash-edge"          # whatever you named it in the Manager

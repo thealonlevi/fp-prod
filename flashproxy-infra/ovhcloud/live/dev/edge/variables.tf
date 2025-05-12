@@ -44,5 +44,18 @@ variable "datacentre" {
 variable "ssh_pub_key_path" {
   description = "Path to the SSH *public* key that cloud-init will authorise"
   type        = string
-  default     = "${path.root}/../../../ssh/id_rsa.pub"
+  default     = "./id_rsa.pub"
+}
+
+#############################
+# Existing server to manage
+#############################
+variable "service_name" {
+  description = "The dedicated-server service name, e.g. ns123456.ip-xxx-xx-xx.eu"
+  type        = string
+}
+
+variable "ssh_key_name" {
+  description = "Name of an SSH public-key already uploaded in OVH Manager"
+  type        = string
 }
