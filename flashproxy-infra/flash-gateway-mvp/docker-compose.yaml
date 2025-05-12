@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+  # ────────── Proxy stack ──────────
+  haproxy:
+    image: haproxytech/haproxy-alpine:2.9
+    container_name: haproxy
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - /var/log:/var/log                      # rsyslog writes here
+
+  socks:
+    image: maximusou/3proxy
+    container_name: socks5
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /var/log:/var/log
+
+  # ────────── Observability stack ──────────
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: loki
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - loki_data:/loki
+      - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
+    command: -config.file=/etc/loki/local-config.yaml
+
+  promtail:
+    image: grafana/promtail:2.9.4
+    container_name: promtail
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /var/log:/var/log
+      - ./promtail.yaml:/etc/promtail.yaml:ro
+    command: -config.file=/etc/promtail.yaml
+
+  grafana:
+    image: grafana/grafana-enterprise:10.4.2
+    container_name: grafana
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: changeme   # ← change in production
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  loki_data:
+  grafana_data:

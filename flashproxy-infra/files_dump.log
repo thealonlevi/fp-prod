@@ -1,0 +1,1054 @@
+live\prod\network\main.tf:
+#################################
+# main.tf – shared prod network #
+#################################
+
+#############################
+# VPC & Internet Gateway    #
+#############################
+
+resource "aws_vpc" "gw" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  tags = { Name = "sdk-gw-vpc" }
+}
+
+resource "aws_internet_gateway" "gw" {
+  vpc_id = aws_vpc.gw.id
+}
+
+#############################
+# Public Subnet + Route     #
+#############################
+
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.gw.id
+  cidr_block              = var.public_subnet_cidr
+  availability_zone       = var.az
+  map_public_ip_on_launch = true
+  tags = { Name = "sdk-gw-public" }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.gw.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.gw.id
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+live\prod\network\outputs.tf:
+output "vpc_id" {
+  description = "Shared VPC ID"
+  value       = aws_vpc.gw.id
+}
+
+output "public_subnet_id" {
+  description = "Public subnet ID for gateway/server stacks"
+  value       = aws_subnet.public.id
+}
+
+live\prod\network\variables.tf:
+variable "aws_region" {
+  type    = string
+  default = "eu-central-1"
+}
+
+variable "az" {
+  description = "AZ for the public subnet"
+  type        = string
+  default     = "eu-central-1a"
+}
+
+variable "vpc_cidr" {
+  type    = string
+  default = "10.10.0.0/16"
+}
+
+variable "public_subnet_cidr" {
+  type    = string
+  default = "10.10.1.0/24"
+}
+
+live\prod\network\versions.tf:
+terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+live\prod\sdk-gateway\main.tf:
+#################################
+# main.tf – sdk-gateway (network-layer decoupled)
+# • Assumes VPC & subnet are pre-created by live/prod/network
+# • Keeps warm-up + extended TF timeout
+#################################
+
+#############################
+# Look up shared VPC/Subnet #
+#############################
+
+data "aws_vpc" "gw" {
+  filter {
+    name   = "tag:Name"
+    values = ["sdk-gw-vpc"]
+  }
+}
+
+data "aws_subnet" "public" {
+  filter {
+    name   = "tag:Name"
+    values = ["sdk-gw-public"]
+  }
+}
+
+########################
+# Security Group       #
+########################
+
+resource "aws_security_group" "sdk_sg" {
+  name_prefix = "sdk-gw-"                       # avoid duplicate-name clashes
+  description = "Allow inbound TCP 8080"
+  vpc_id      = data.aws_vpc.gw.id
+
+  ingress {
+    protocol    = "tcp"
+    from_port   = var.gateway_port
+    to_port     = var.gateway_port
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # SSH (optional)
+  ingress {
+    protocol    = "tcp"
+    from_port   = 22
+    to_port     = 22
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    protocol    = "-1"
+    from_port   = 0
+    to_port     = 0
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+########################
+# Launch Template      #
+########################
+
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*"]
+  }
+}
+
+##############################################
+# Discover sdk-server NLB in the same account
+##############################################
+data "aws_lb" "sdk_server" {
+  name = "sdk-server-nlb"
+}
+
+resource "aws_launch_template" "sdk_lt" {
+  name_prefix            = "sdk-gw-"
+  image_id               = data.aws_ami.amazon_linux.id
+  instance_type          = var.instance_type
+  vpc_security_group_ids = [aws_security_group.sdk_sg.id]
+
+  user_data = base64encode(
+    templatefile("${path.module}/userdata.tpl", {
+      gateway_port        = var.gateway_port,
+      sdk_gateway_tag     = var.sdk_gateway_tag,
+      sdk_server_endpoint = "${data.aws_lb.sdk_server.dns_name}:9090"
+    })
+  )
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+##########################
+# Auto Scaling Group     #
+##########################
+
+resource "aws_autoscaling_group" "sdk_asg" {
+  desired_capacity          = var.instance_count
+  min_size                  = 1
+  max_size                  = 10
+  vpc_zone_identifier       = [data.aws_subnet.public.id]
+  wait_for_capacity_timeout = "25m"
+  default_instance_warmup   = 600   # 10-min warm-up
+
+  launch_template {
+    id      = aws_launch_template.sdk_lt.id
+    version = "$Latest"
+  }
+
+  target_group_arns         = [aws_lb_target_group.sdk_tg.arn]
+  health_check_type         = "EC2"
+  health_check_grace_period = 60
+
+  tag {
+    key                 = "Name"
+    value               = "sdk-gateway"
+    propagate_at_launch = true
+  }
+}
+
+############################
+# Network Load Balancer    #
+############################
+
+resource "aws_lb" "sdk_nlb" {
+  name               = "sdk-nlb"
+  load_balancer_type = "network"
+  subnets            = [data.aws_subnet.public.id]
+}
+
+resource "aws_lb_target_group" "sdk_tg" {
+  name        = "sdk-tg"
+  port        = var.gateway_port
+  protocol    = "TCP"
+  target_type = "instance"
+  vpc_id      = data.aws_vpc.gw.id
+
+  health_check { protocol = "TCP" }
+}
+
+resource "aws_lb_listener" "sdk_listener" {
+  load_balancer_arn = aws_lb.sdk_nlb.arn
+  port              = var.gateway_port
+  protocol          = "TCP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.sdk_tg.arn
+  }
+}
+
+live\prod\sdk-gateway\outputs.tf:
+# Outputs the public‐facing NLB DNS name for clients
+output "sdk_gateway_endpoint" {
+  description = "DNS name clients should connect to"
+  value       = aws_lb.sdk_nlb.dns_name
+}
+
+live\prod\sdk-gateway\scaling.tf:
+#########################################
+# scaling.tf – autoscale sdk-gateway ASG
+#########################################
+
+locals {
+  lb_id  = aws_lb.sdk_nlb.arn_suffix
+  tg_id  = aws_lb_target_group.sdk_tg.arn_suffix
+  asg_id = aws_autoscaling_group.sdk_asg.name
+}
+
+############################
+# 1. Flows-per-instance math
+############################
+resource "aws_cloudwatch_metric_alarm" "flows_per_instance_math" {
+  alarm_name          = "sdk-gw-math-FlowsPerInstance"
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  evaluation_periods  = 1
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id = "raw_flows"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "ActiveFlowCount"
+      period      = 60
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = local.lb_id }
+    }
+  }
+
+  metric_query {
+    id         = "flows"
+    expression = "FILL(raw_flows, 0)"
+  }
+
+  metric_query {
+    id = "raw_hosts"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "HealthyHostCount"
+      period      = 60
+      stat        = "Average"
+      dimensions  = {
+        LoadBalancer = local.lb_id
+        TargetGroup  = local.tg_id
+      }
+    }
+  }
+
+  metric_query {
+    id         = "hosts"
+    expression = "FILL(raw_hosts, 1)"
+  }
+
+  metric_query {
+    id          = "fpi"
+    expression  = "flows / hosts"
+    label       = "FlowsPerInstance"
+    return_data = true
+  }
+}
+
+############################
+# 2. Step-scaling policies
+############################
+resource "aws_autoscaling_policy" "scale_out" {
+  name                    = "sdk-gw-scale-out"
+  autoscaling_group_name  = local.asg_id
+  policy_type             = "StepScaling"
+  adjustment_type         = "ChangeInCapacity"
+  metric_aggregation_type = "Average"
+
+  step_adjustment {
+    metric_interval_lower_bound = 0
+    scaling_adjustment          = 1
+  }
+}
+
+resource "aws_autoscaling_policy" "scale_in" {
+  name                    = "sdk-gw-scale-in"
+  autoscaling_group_name  = local.asg_id
+  policy_type             = "StepScaling"
+  adjustment_type         = "ChangeInCapacity"
+  metric_aggregation_type = "Average"
+
+  step_adjustment {
+    metric_interval_upper_bound = 0
+    scaling_adjustment          = -1
+  }
+}
+
+############################
+# 3a. High-flow alarm
+############################
+resource "aws_cloudwatch_metric_alarm" "high_flows" {
+  alarm_name          = "sdk-gw-HighFlows"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  threshold           = 200
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_autoscaling_policy.scale_out.arn]
+
+  metric_query {
+    id = "raw_flows"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "ActiveFlowCount"
+      period      = 60
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = local.lb_id }
+    }
+  }
+
+  metric_query {
+    id         = "flows"
+    expression = "FILL(raw_flows, 0)"
+  }
+
+  metric_query {
+    id = "raw_hosts"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "HealthyHostCount"
+      period      = 60
+      stat        = "Average"
+      dimensions  = {
+        LoadBalancer = local.lb_id
+        TargetGroup  = local.tg_id
+      }
+    }
+  }
+
+  metric_query {
+    id         = "hosts"
+    expression = "FILL(raw_hosts, 1)"
+  }
+
+  metric_query {
+    id          = "fpi"
+    expression  = "flows / hosts"
+    label       = "FlowsPerInstance"
+    return_data = true
+  }
+}
+
+############################
+# 3b. Low-flow alarm (12 min)
+############################
+resource "aws_cloudwatch_metric_alarm" "low_flows" {
+  alarm_name          = "sdk-gw-LowFlows"
+  evaluation_periods  = 12      # 12 × 60 s = 12 min
+  datapoints_to_alarm = 12
+  threshold           = 50
+  comparison_operator = "LessThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_autoscaling_policy.scale_in.arn]
+
+  metric_query {
+    id = "raw_flows"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "ActiveFlowCount"
+      period      = 60
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = local.lb_id }
+    }
+  }
+
+  metric_query {
+    id         = "flows"
+    expression = "FILL(raw_flows, 0)"
+  }
+
+  metric_query {
+    id = "raw_hosts"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "HealthyHostCount"
+      period      = 60
+      stat        = "Average"
+      dimensions  = {
+        LoadBalancer = local.lb_id
+        TargetGroup  = local.tg_id
+      }
+    }
+  }
+
+  metric_query {
+    id         = "hosts"
+    expression = "FILL(raw_hosts, 1)"
+  }
+
+  metric_query {
+    id          = "fpi"
+    expression  = "flows / hosts"
+    label       = "FlowsPerInstance"
+    return_data = true
+  }
+}
+
+############################
+# 4. Low CPU-credit alarm
+############################
+resource "aws_cloudwatch_metric_alarm" "low_cpu_credit" {
+  alarm_name          = "sdk-gw-LowCPUCredits"
+  namespace           = "AWS/EC2"
+  metric_name         = "CPUCreditBalance"
+  statistic           = "Minimum"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = 20
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "notBreaching"
+  dimensions          = { AutoScalingGroupName = local.asg_id }
+  alarm_actions       = [aws_autoscaling_policy.scale_out.arn]
+}
+
+live\prod\sdk-gateway\userdata.tpl:
+#!/bin/bash
+# ---------- sdk-gateway build-at-boot ----------
+set -euo pipefail
+
+PORT=${gateway_port}            # Terraform var (8080)
+TAG=${sdk_gateway_tag}          # Terraform var (e.g. v0.1.2)
+UPSTREAM=${sdk_server_endpoint} # Terraform var (<server-NLB>:9090)
+
+echo "[boot] installing Go tool-chain…"
+GO_VER=1.22.4
+curl -sL "https://go.dev/dl/go$${GO_VER}.linux-amd64.tar.gz" -o /tmp/go.tgz
+tar -C /usr/local -xzf /tmp/go.tgz
+export PATH=$PATH:/usr/local/go/bin
+
+# Go needs a writable cache dir when run by cloud-init
+export HOME=/root
+export GOCACHE=/root/.cache/go
+mkdir -p "$GOCACHE"
+
+echo "[boot] fetching mock-gateway tag $${TAG}…"
+mkdir -p /opt/sdk
+curl -sL "https://github.com/thealonlevi/mock-gateway/archive/refs/tags/$${TAG}.tar.gz" \
+  | tar -xz -C /opt/sdk --strip-components 1
+
+echo "[boot] building static proxy binary…"
+cd /opt/sdk
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -ldflags="-s -w -X main.upstream=$${UPSTREAM}" \
+  -o /usr/local/bin/mock-gateway ./main.go
+
+echo "[boot] creating systemd unit…"
+cat >/etc/systemd/system/sdk-gw.service <<EOF
+[Unit]
+Description=sdk-gateway -> $${UPSTREAM}
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/mock-gateway
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now sdk-gw
+echo "[boot] sdk-gateway proxy ready on :$${PORT} (upstream=$${UPSTREAM})"
+
+live\prod\sdk-gateway\variables.tf:
+variable "aws_region" {
+  description = "AWS region to deploy into"
+  type        = string
+  default     = "eu-central-1"
+}
+
+variable "az" {
+  description = "Single AZ to run everything in"
+  type        = string
+  default     = "eu-central-1a"
+}
+
+variable "instance_count" {
+  description = "How many sdk-gateway EC2 instances to launch"
+  type        = number
+  default     = 3
+}
+
+variable "gateway_port" {
+  description = "Port sdk-gateway listens on (and NLB forwards)"
+  type        = number
+  default     = 8080
+}
+
+variable "instance_type" {
+  description = "EC2 instance size"
+  type        = string
+  default     = "t3.small"
+}
+
+variable "sdk_gateway_download_url" {
+  description = "URL to the sdk-gateway binary"
+  type        = string
+  default     = "https://example.com/sdk-gateway-linux-amd64"
+}
+
+variable "sdk_gateway_tag" {
+  description = "Git tag (release) to fetch and build, e.g. v0.1.0"
+  type        = string
+  default     = "v0.1.2"
+}
+
+
+live\prod\sdk-gateway\versions.tf:
+terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region      # default is eu-central-1
+}
+
+live\prod\sdk-server\main.tf:
+#################################
+# main.tf – sdk-server (final clean version)
+# • Uses shared VPC/subnet from live/prod/network
+# • Security-group uses name_prefix (no duplicate errors)
+# • No dependency on the gateway SG
+#################################
+
+#############################
+# Look up existing network  #
+#############################
+
+data "aws_vpc" "gw_vpc" {
+  filter {
+    name   = "tag:Name"
+    values = ["sdk-gw-vpc"]
+  }
+}
+
+data "aws_subnet" "gw_public" {
+  filter {
+    name   = "tag:Name"
+    values = ["sdk-gw-public"]
+  }
+}
+
+########################
+# Security Group       #
+########################
+
+resource "aws_security_group" "sdk_srv_sg" {
+  name_prefix = "sdk-srv-"                # unique name each apply
+  description = "Allow TCP 9090 from VPC"
+  vpc_id      = data.aws_vpc.gw_vpc.id
+
+  # App traffic from anywhere inside the VPC (covers NLB + gateways)
+  ingress {
+    protocol    = "tcp"
+    from_port   = var.server_port
+    to_port     = var.server_port
+    cidr_blocks = ["10.10.0.0/16"]        # VPC CIDR
+    description = "VPC traffic to sdk-server"
+  }
+
+  # Optional SSH for debugging
+  ingress {
+    protocol    = "tcp"
+    from_port   = 22
+    to_port     = 22
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # All egress allowed
+  egress {
+    protocol    = "-1"
+    from_port   = 0
+    to_port     = 0
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+########################
+# Launch Template      #
+########################
+
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*"]
+  }
+}
+
+resource "aws_launch_template" "sdk_srv_lt" {
+  name_prefix            = "sdk-srv-"
+  image_id               = data.aws_ami.amazon_linux.id
+  instance_type          = var.instance_type
+  vpc_security_group_ids = [aws_security_group.sdk_srv_sg.id]
+
+  user_data = base64encode(
+    templatefile("${path.module}/userdata.tpl", {
+      server_port    = var.server_port,
+      sdk_server_tag = var.sdk_server_tag
+    })
+  )
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+##########################
+# Auto Scaling Group     #
+##########################
+
+resource "aws_autoscaling_group" "sdk_srv_asg" {
+  desired_capacity    = var.instance_count
+  min_size            = 1
+  max_size            = 10
+  vpc_zone_identifier = [data.aws_subnet.gw_public.id]
+
+  launch_template {
+    id      = aws_launch_template.sdk_srv_lt.id
+    version = "$Latest"
+  }
+
+  target_group_arns         = [aws_lb_target_group.sdk_srv_tg.arn]
+  health_check_type         = "EC2"
+  health_check_grace_period = 60
+
+  tag {
+    key                 = "Name"
+    value               = "sdk-server"
+    propagate_at_launch = true
+  }
+}
+
+############################
+# Network Load Balancer    #
+############################
+
+resource "aws_lb" "sdk_srv_nlb" {
+  name               = "sdk-server-nlb"
+  internal           = true
+  load_balancer_type = "network"
+  subnets            = [data.aws_subnet.gw_public.id]
+}
+
+resource "aws_lb_target_group" "sdk_srv_tg" {
+  name        = "sdk-server-tg"
+  port        = var.server_port
+  protocol    = "TCP"
+  target_type = "instance"
+  vpc_id      = data.aws_vpc.gw_vpc.id
+
+  health_check {
+    protocol = "TCP"
+  }
+}
+
+resource "aws_lb_listener" "sdk_srv_listener" {
+  load_balancer_arn = aws_lb.sdk_srv_nlb.arn
+  port              = var.server_port
+  protocol          = "TCP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.sdk_srv_tg.arn
+  }
+}
+
+live\prod\sdk-server\outputs.tf:
+output "sdk_server_endpoint" {
+  description = "DNS name of the sdk-server Network Load Balancer"
+  value       = aws_lb.sdk_srv_nlb.dns_name
+}
+
+live\prod\sdk-server\scaling.tf:
+#########################################
+# scaling.tf – autoscale sdk-server ASG
+# • Mirrors sdk-gateway thresholds and policies
+#########################################
+
+locals {
+  lb_id  = aws_lb.sdk_srv_nlb.arn_suffix            # net/sdk-server-nlb/…
+  tg_id  = aws_lb_target_group.sdk_srv_tg.arn_suffix
+  asg_id = aws_autoscaling_group.sdk_srv_asg.name
+}
+
+############################
+# 1. Flows-per-instance math
+############################
+resource "aws_cloudwatch_metric_alarm" "flows_per_instance_math" {
+  alarm_name          = "sdk-srv-math-FlowsPerInstance"
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  evaluation_periods  = 1
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id = "raw_flows"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "ActiveFlowCount"
+      period      = 60
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = local.lb_id }
+    }
+  }
+
+  metric_query {
+    id         = "flows"
+    expression = "FILL(raw_flows, 0)"
+  }
+
+  metric_query {
+    id = "raw_hosts"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "HealthyHostCount"
+      period      = 60
+      stat        = "Average"
+      dimensions = {
+        LoadBalancer = local.lb_id
+        TargetGroup  = local.tg_id
+      }
+    }
+  }
+
+  metric_query {
+    id         = "hosts"
+    expression = "FILL(raw_hosts, 1)"
+  }
+
+  metric_query {
+    id          = "fpi"
+    expression  = "flows / hosts"
+    label       = "FlowsPerInstance"
+    return_data = true
+  }
+}
+
+############################
+# 2. Step-scaling policies
+############################
+resource "aws_autoscaling_policy" "scale_out" {
+  name                    = "sdk-srv-scale-out"
+  autoscaling_group_name  = local.asg_id
+  policy_type             = "StepScaling"
+  adjustment_type         = "ChangeInCapacity"
+  metric_aggregation_type = "Average"
+
+  step_adjustment {
+    metric_interval_lower_bound = 0
+    scaling_adjustment          = 1
+  }
+}
+
+resource "aws_autoscaling_policy" "scale_in" {
+  name                    = "sdk-srv-scale-in"
+  autoscaling_group_name  = local.asg_id
+  policy_type             = "StepScaling"
+  adjustment_type         = "ChangeInCapacity"
+  metric_aggregation_type = "Average"
+
+  step_adjustment {
+    metric_interval_upper_bound = 0
+    scaling_adjustment          = -1
+  }
+}
+
+############################
+# 3a. High-flow alarm
+############################
+resource "aws_cloudwatch_metric_alarm" "high_flows" {
+  alarm_name          = "sdk-srv-HighFlows"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  threshold           = 200
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_autoscaling_policy.scale_out.arn]
+
+  metric_query {
+    id = "raw_flows"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "ActiveFlowCount"
+      period      = 60
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = local.lb_id }
+    }
+  }
+
+  metric_query {
+    id         = "flows"
+    expression = "FILL(raw_flows, 0)"
+  }
+
+  metric_query {
+    id = "raw_hosts"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "HealthyHostCount"
+      period      = 60
+      stat        = "Average"
+      dimensions = {
+        LoadBalancer = local.lb_id
+        TargetGroup  = local.tg_id
+      }
+    }
+  }
+
+  metric_query {
+    id         = "hosts"
+    expression = "FILL(raw_hosts, 1)"
+  }
+
+  metric_query {
+    id          = "fpi"
+    expression  = "flows / hosts"
+    label       = "FlowsPerInstance"
+    return_data = true
+  }
+}
+
+############################
+# 3b. Low-flow alarm (12 min)
+############################
+resource "aws_cloudwatch_metric_alarm" "low_flows" {
+  alarm_name          = "sdk-srv-LowFlows"
+  evaluation_periods  = 12         # 12 × 60 s = 12 min
+  datapoints_to_alarm = 12
+  threshold           = 50
+  comparison_operator = "LessThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_autoscaling_policy.scale_in.arn]
+
+  metric_query {
+    id = "raw_flows"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "ActiveFlowCount"
+      period      = 60
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = local.lb_id }
+    }
+  }
+
+  metric_query {
+    id         = "flows"
+    expression = "FILL(raw_flows, 0)"
+  }
+
+  metric_query {
+    id = "raw_hosts"
+    metric {
+      namespace   = "AWS/NetworkELB"
+      metric_name = "HealthyHostCount"
+      period      = 60
+      stat        = "Average"
+      dimensions = {
+        LoadBalancer = local.lb_id
+        TargetGroup  = local.tg_id
+      }
+    }
+  }
+
+  metric_query {
+    id         = "hosts"
+    expression = "FILL(raw_hosts, 1)"
+  }
+
+  metric_query {
+    id          = "fpi"
+    expression  = "flows / hosts"
+    label       = "FlowsPerInstance"
+    return_data = true
+  }
+}
+
+############################
+# 4. Low CPU-credit alarm
+############################
+resource "aws_cloudwatch_metric_alarm" "low_cpu_credit" {
+  alarm_name          = "sdk-srv-LowCPUCredits"
+  namespace           = "AWS/EC2"
+  metric_name         = "CPUCreditBalance"
+  statistic           = "Minimum"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = 20
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "notBreaching"
+  dimensions          = { AutoScalingGroupName = local.asg_id }
+  alarm_actions       = [aws_autoscaling_policy.scale_out.arn]
+}
+
+live\prod\sdk-server\userdata.tpl:
+#!/bin/bash
+# ---------- sdk-server build-at-boot ----------
+set -euo pipefail
+
+PORT=${server_port}        # Terraform var → literal number (e.g. 9090)
+TAG=${sdk_server_tag}      # Terraform var → Git tag
+
+echo "[boot] installing Go tool-chain…"
+GO_VER=1.22.4
+curl -sL "https://go.dev/dl/go$${GO_VER}.linux-amd64.tar.gz" -o /tmp/go.tgz
+tar -C /usr/local -xzf /tmp/go.tgz
+export PATH=$PATH:/usr/local/go/bin
+
+export HOME=/root
+export GOCACHE=/root/.cache/go
+mkdir -p "$GOCACHE"
+
+echo "[boot] fetching mock-server tag $${TAG}…"
+mkdir -p /opt/sdk
+curl -sL "https://github.com/thealonlevi/mock-server/archive/refs/tags/$${TAG}.tar.gz" \
+  | tar -xz -C /opt/sdk --strip-components 1
+
+echo "[boot] building static binary…"
+cd /opt/sdk
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -ldflags="-s -w" -o /usr/local/bin/mock-server ./main.go
+
+echo "[boot] creating systemd unit…"
+cat >/etc/systemd/system/sdk-srv.service <<EOF
+[Unit]
+Description=sdk-server (echo instance-id)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/mock-server
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now sdk-srv
+echo "[boot] sdk-server ready on :$${PORT}"
+
+live\prod\sdk-server\variables.tf:
+variable "aws_region" {
+  type    = string
+  default = "eu-central-1"
+}
+
+variable "instance_count" {
+  type    = number
+  default = 3
+}
+
+variable "server_port" {
+  description = "Port sdk-server listens on"
+  type        = number
+  default     = 9090
+}
+
+variable "instance_type" {
+  type    = string
+  default = "t3.small"
+}
+
+variable "sdk_server_tag" {
+  description = "Git tag for mock-server, e.g. v0.1.2"
+  type        = string
+  default     = "v0.1.2"
+}
+
+live\prod\sdk-server\versions.tf:
+terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+

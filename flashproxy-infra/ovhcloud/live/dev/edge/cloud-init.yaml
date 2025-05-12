@@ -1,0 +1,31 @@
+#cloud-config
+package_update: true
+packages: [docker.io, curl]
+
+write_files:
+  - path: /opt/edge/docker-compose.yml
+    content: |
+      version: "3.9"
+      services:
+        haproxy:
+          image: haproxytech/haproxy-alpine:2.9
+          restart: unless-stopped
+          network_mode: host
+          volumes:
+            - /data/cfg/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+        socks:
+          image: maximusou/3proxy               # tiny SOCKS5 shim
+          restart: unless-stopped
+          network_mode: host
+        promtail:
+          image: grafana/promtail
+          network_mode: host
+          volumes:
+            - /var/log:/var/log
+          command: -config.file=/etc/promtail.yaml
+
+runcmd:
+  - systemctl enable --now docker
+  - git clone --depth 1 https://github.com/YourOrg/flashproxy-infra.git /opt/src
+  - docker compose -f /opt/src/flashproxy-infra/flash-gateway-mvp/docker-compose.yml up -d
+
