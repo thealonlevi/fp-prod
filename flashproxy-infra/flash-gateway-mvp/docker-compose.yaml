@@ -5,14 +5,15 @@ services:
   haproxy:
     image: haproxytech/haproxy-alpine:2.9
     container_name: haproxy
-    network_mode: host
+    network_mode: host                 # binds :443 on the VM itself
     restart: unless-stopped
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - /var/log:/var/log            # rsyslog writes here
+      - ./spoe-auth.cfg:/etc/haproxy/spoe-auth.cfg:ro   # ← NEW (SPOE rules)
+      - /var/log:/var/log                                # rsyslog writes here
 
   socks:
-    image: tarampampam/3proxy:1.12.0  # ← public, actively maintained
+    image: tarampampam/3proxy:1.12.0
     container_name: socks5
     network_mode: host
     restart: unless-stopped
