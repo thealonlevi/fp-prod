@@ -1,0 +1,59 @@
+version: "3.9"
+
+###############################################################################
+# FlashProxy – Auth Stack (runs on its own VM, separate from the HAProxy edge)
+###############################################################################
+# • Redis 7.2 – durable AOF, password-protected
+# • Auth-SPOA – tiny Go service that validates proxy creds via Redis
+#
+# Both containers use `network_mode: host` so they bind directly to the VM’s
+# ports (6379 and 9000).  HAProxy nodes just point at vm_ip:9000.
+#
+# Secrets: keep REDIS_PASS in a local          .env    file   or
+#          store it as a Docker secret (shown below).
+###############################################################################
+
+services:
+  # ────────── Redis (credentials DB) ──────────
+  redis:
+    image: redis:7.2-alpine                # latest alpine tag
+    container_name: redis
+    restart: unless-stopped
+    network_mode: host                     # ← binds :6379 on the VM
+    command: >
+      redis-server
+        --appendonly yes                   # durable AOF
+        --requirepass "$${REDIS_PASS}"     # password from env/secret
+    volumes:
+      - redis_data:/data
+    env_file: [.env]                       # holds REDIS_PASS=…
+
+    healthcheck:
+      test: ["CMD-SHELL",
+             "redis-cli -a $$REDIS_PASS ping | grep PONG || exit 1"]
+      interval: 10s
+      retries: 5
+      timeout: 3s
+
+  # ────────── SPOE auth-agent ──────────
+  auth-spoa:
+    build:
+      context: ./flash-auth-agent          # folder that has Dockerfile / main.go
+      dockerfile: Dockerfile
+    container_name: auth-spoa
+    restart: unless-stopped
+    network_mode: host                     # ← binds :9000 on the VM
+    depends_on: [redis]
+    env_file: [.env]
+    command: >
+      -listen=:9000
+      -redis=127.0.0.1:6379
+      -redis-password=$${REDIS_PASS}
+
+volumes:
+  redis_data:
+
+# ───── optional: keep secrets out of .env ─────
+# secrets:
+#   redis_pass:
+#     file: ./redis.pass
