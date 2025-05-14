@@ -1,0 +1,232 @@
+docker-compose.yaml:
+version: "3.9"
+
+services:
+  # ────────── Proxy stack ──────────
+  haproxy:
+    image: haproxytech/haproxy-alpine:2.9
+    container_name: haproxy
+    network_mode: host                 # binds :443 on the VM itself
+    restart: unless-stopped
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./spoe-auth.cfg:/etc/haproxy/spoe-auth.cfg:ro   # ← NEW (SPOE rules)
+      - /var/log:/var/log                                # rsyslog writes here
+
+  socks:
+    image: tarampampam/3proxy:1.12.0
+    container_name: socks5
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /var/log:/var/log
+
+  # ────────── Observability stack ──────────
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: loki
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - loki_data:/loki
+      - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
+    command: -config.file=/etc/loki/local-config.yaml
+
+  promtail:
+    image: grafana/promtail:2.9.4
+    container_name: promtail
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /var/log:/var/log
+      - ./promtail.yaml:/etc/promtail.yaml:ro
+    command: -config.file=/etc/promtail.yaml
+
+  grafana:
+    image: grafana/grafana-enterprise:10.4.2
+    container_name: grafana
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: changeme   # ← change in production
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  loki_data:
+  grafana_data:
+
+haproxy.cfg:
+###############################################################################
+# FlashProxy – Edge Gateway (HAProxy 2.9)
+#   • External auth via SPOE → sdk.opsec-development.com:9000
+#   • Per-IP 1 Gb/s bandwidth guard
+#   • Bright Data super-proxy backend
+###############################################################################
+
+############################### GLOBAL ########################################
+global
+    log stdout format raw local0
+    master-worker                 # seamless reloads
+    nbthread 2
+    maxconn 200000
+
+############################### DEFAULTS ######################################
+defaults
+    mode            http
+    timeout connect 5s
+    timeout client  4m
+    timeout server  4m
+    option          dontlognull
+
+############################### SPOE FILTER ###################################
+# Extra file lives at /etc/haproxy/spoe-auth.cfg
+# (see previous message for full contents)
+###############################################################################
+
+############################### FRONTEND :443 #################################
+frontend edge_in
+    bind :443                                   # add "ssl crt …" once you’re ready
+    mode http
+
+    # ── per-IP bandwidth cap (1 Gb/s) ────────────────────────────────────────
+    stick-table type ip size 1m expire 1s store bytes_out_rate(1s)
+    tcp-request session track-sc0 src
+    acl  over_quota sc0_bytes_out_rate gt 125000000
+    tcp-request content reject if over_quota
+
+    # ── deny if header missing (saves SPOE round-trip) ──────────────────────
+    acl missing_auth req.hdr(Proxy-Authorization) -m len 0
+    http-request deny status 407 realm FlashProxy if missing_auth
+
+    # ── extract Basic user:pass for SPOE message ────────────────────────────
+    http-request set-var(req.b64)       req.hdr(Proxy-Authorization),field(1,:)
+    http-request set-var(req.username)  var(req.b64),base64,field(1,:)
+    http-request set-var(req.password)  var(req.b64),base64,field(2,:)
+
+    # ── call auth-engine over SPOE ──────────────────────────────────────────
+    filter spoe engine auth-engine config /etc/haproxy/spoe-auth.cfg
+
+    # SPOE agent sets txn.auth.auth_ok → 1 on success
+    acl authenticated var(txn.auth.auth_ok) -m int 1
+    http-request deny status 407 realm FlashProxy if !authenticated
+
+    # ── copy client header to normal Authorization (optional) ───────────────
+    http-request set-header Authorization %[req.hdr(Proxy-Authorization)]
+
+    # ── inject Bright Data credentials ──────────────────────────────────────
+    http-request set-header Proxy-Authorization \
+        "Basic YnJkLWN1c3RvbWVyLWhsXzE5Y2IwZmU4LXpvbmUtYWw0LWNvdW50cnktVVMtc2Vzc2lvbi0xMjM0NTY3ODowMzVrbngzM2RtbjI="
+
+    default_backend superproxy
+
+############################### BACKEND #######################################
+backend superproxy
+    mode http
+    # for TLS to BD: brd.superproxy.io:443 ssl verify none
+    server brd1 brd.superproxy.io:22225
+
+    # ── strip BD trace headers before client sees them ──────────────────────
+    http-response del-header X-Luminati-IP
+    http-response del-header X-Luminati-Timeline
+    http-response del-header X-Luminati-Tun-Timeline
+    http-response del-header X-Luminati-P2P-Timeline
+    http-response del-header X-BRD-IP
+    http-response del-header X-BRD-Timeline
+    http-response del-header X-BRD-Tun-Timeline
+    http-response del-header X-BRD-P2P-Timeline
+
+loki-config.yaml:
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+analytics:
+  reporting_enabled: false           # opt-out of usage stats
+
+###############################################################################
+# Single-node ring (in-memory) + unified data directory
+###############################################################################
+common:
+  path_prefix: /loki                 # root for all data dirs
+  ring:
+    kvstore:
+      store: inmemory
+  replication_factor: 1
+
+###############################################################################
+# Storage
+###############################################################################
+storage_config:
+  boltdb_shipper:
+    active_index_directory: /loki/index
+    cache_location:         /loki/index_cache
+    cache_ttl:              24h
+    shared_store:           filesystem
+  filesystem:
+    directory: /loki/chunks
+
+compactor:
+  working_directory: /loki/compactor
+  shared_store:      filesystem
+
+ingester:
+  wal:
+    enabled: true
+    dir: /loki/wal
+
+schema_config:
+  configs:
+    - from: 2023-01-01
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v11
+      index:
+        prefix: index_
+        period: 24h
+
+promtail.yaml:
+# ───── Promtail (self-host, shipping to local Loki) ─────
+server:
+  http_listen_port: 0            # disable Promtail web UI
+
+positions:
+  filename: /var/log/positions.yaml
+
+clients:
+  - url: http://localhost:3100/loki/api/v1/push   # <─ local Loki
+
+scrape_configs:
+  - job_name: flash-edge
+    static_configs:
+      - targets: ['localhost']
+        labels:
+          job: flash-edge
+          __path__: /var/log/*proxy*.log          # haproxy.log, 3proxy.log
+
+spoe-auth.cfg:
+###############################################################################
+# SPOE agent definition – FlashProxy edge
+# The auth-agent is running on a separate VM:
+#   sdk.opsec-development.com :9000
+###############################################################################
+
+[spoe-agent auth-engine]
+  timeout hello 3s
+  timeout idle  30s
+  messages      check_credentials
+  option        var-prefix auth
+
+  # ── remote agent(s) ───────────────────────────────────────────────────────
+  server auth1 sdk.opsec-development.com:9000
+
+[spoe-message check_credentials]
+  # These vars are set in haproxy.cfg:
+  #   req.username  – decoded Basic username
+  #   req.password  – decoded Basic password
+  args username=var(req.username) password=var(req.password)
+
