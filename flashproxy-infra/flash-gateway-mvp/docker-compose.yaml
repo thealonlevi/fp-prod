@@ -5,20 +5,20 @@ services:
   haproxy:
     image: haproxytech/haproxy-alpine:2.9
     container_name: haproxy
-    network_mode: host                 # binds :443 on the VM itself
+    network_mode: host          # still host, but no longer binds :443
     restart: unless-stopped
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - ./spoe-auth.cfg:/etc/haproxy/spoe-auth.cfg:ro   # ← NEW (SPOE rules)
-      - /var/log:/var/log                                # rsyslog writes here
+      # ↓ REMOVE the SPOE mount – no longer needed
+      # - ./spoe-auth.cfg:/etc/haproxy/spoe-auth.cfg:ro
+      - /var/log:/var/log
 
   socks:
     image: tarampampam/3proxy:1.12.0
     container_name: socks5
     network_mode: host
     restart: unless-stopped
-    volumes:
-      - /var/log:/var/log
+    volumes: [ /var/log:/var/log ]
 
   # ────────── Observability stack ──────────
   loki:
@@ -48,7 +48,7 @@ services:
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: changeme   # ← change in production
+      GF_SECURITY_ADMIN_PASSWORD: changeme
     volumes:
       - grafana_data:/var/lib/grafana
 
