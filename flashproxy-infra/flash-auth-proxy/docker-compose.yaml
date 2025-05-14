@@ -10,15 +10,16 @@ services:
 
   auth-proxy:
     build: ../flash-auth-proxy
-    network_mode: host          # → listens on :443
+    network_mode: host
     depends_on: [redis]
-    env_file: [ .env ]
+    env_file: [.env]          # REDIS_PASS is defined here
     command:
       - -listen=:443
       - -backend=127.0.0.1:8443
       - -redis=127.0.0.1:6379
-      - -redis-password=${REDIS_PASS}
+      - -redis-password=${REDIS_PASS}   # ← NEW
       - -max-gbps=1
+
 
 volumes:
   redis_data:
