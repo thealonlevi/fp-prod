@@ -9,7 +9,7 @@ services:
     env_file: [.env]
 
   auth-proxy:
-    build: ../flash-auth-proxy          # path to the Dockerfile
+    build: .          # path to the Dockerfile
     network_mode: host                  # listens on :443
     depends_on: [redis]
     env_file: [.env]                    # injects REDIS_PASS env var
