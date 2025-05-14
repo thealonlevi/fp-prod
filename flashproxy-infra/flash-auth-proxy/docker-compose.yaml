@@ -4,20 +4,24 @@ services:
   redis:
     image: redis:7.2-alpine
     network_mode: host
-    command: ["redis-server","--appendonly","yes","--requirepass","${REDIS_PASS}"]
+    command:
+      - sh
+      - -c
+      - |
+        exec redis-server --appendonly yes --requirepass "$REDIS_PASS"
     volumes: ["redis_data:/data"]
-    env_file: [.env]
+    env_file: [.env]            # runtime env for redis-server
 
   auth-proxy:
-    build: .          # path to the Dockerfile
-    network_mode: host                  # listens on :443
+    build: .
+    network_mode: host
     depends_on: [redis]
-    env_file: [.env]                    # injects REDIS_PASS env var
+    env_file: [.env]            # gives REDIS_PASS to the proxy
     command:
       - -listen=:443
       - -backend=127.0.0.1:8443
       - -redis=127.0.0.1:6379
-      - -max-gbps=1                    # password picked up from env
+      - -max-gbps=1
 
 volumes:
   redis_data:
