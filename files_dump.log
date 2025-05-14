@@ -1,232 +1,214 @@
+.env:
+# strong random pass, 24+ chars
+REDIS_PASS=YHxk2kbnUq1fFcfLk8aEVe0y
 docker-compose.yaml:
 version: "3.9"
 
+###############################################################################
+# FlashProxy – Auth Stack (runs on its own VM, separate from the HAProxy edge)
+###############################################################################
+# • Redis 7.2 – durable AOF, password-protected
+# • Auth-SPOA – tiny Go service that validates proxy creds via Redis
+#
+# Both containers use `network_mode: host` so they bind directly to the VM’s
+# ports (6379 and 9000).  HAProxy nodes just point at vm_ip:9000.
+#
+# Secrets: keep REDIS_PASS in a local          .env    file   or
+#          store it as a Docker secret (shown below).
+###############################################################################
+
 services:
-  # ────────── Proxy stack ──────────
-  haproxy:
-    image: haproxytech/haproxy-alpine:2.9
-    container_name: haproxy
-    network_mode: host                 # binds :443 on the VM itself
+  # ────────── Redis (credentials DB) ──────────
+  redis:
+    image: redis:7.2-alpine                # latest alpine tag
+    container_name: redis
     restart: unless-stopped
+    network_mode: host                     # ← binds :6379 on the VM
+    command: >
+      redis-server
+        --appendonly yes                   # durable AOF
+        --requirepass "$${REDIS_PASS}"     # password from env/secret
     volumes:
-      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - ./spoe-auth.cfg:/etc/haproxy/spoe-auth.cfg:ro   # ← NEW (SPOE rules)
-      - /var/log:/var/log                                # rsyslog writes here
+      - redis_data:/data
+    env_file: [.env]                       # holds REDIS_PASS=…
 
-  socks:
-    image: tarampampam/3proxy:1.12.0
-    container_name: socks5
-    network_mode: host
-    restart: unless-stopped
-    volumes:
-      - /var/log:/var/log
+    healthcheck:
+      test: ["CMD-SHELL",
+             "redis-cli -a $$REDIS_PASS ping | grep PONG || exit 1"]
+      interval: 10s
+      retries: 5
+      timeout: 3s
 
-  # ────────── Observability stack ──────────
-  loki:
-    image: grafana/loki:2.9.4
-    container_name: loki
-    network_mode: host
+  # ────────── SPOE auth-agent ──────────
+  auth-spoa:
+    build:
+      context: ./flash-auth-agent          # folder that has Dockerfile / main.go
+      dockerfile: Dockerfile
+    container_name: auth-spoa
     restart: unless-stopped
-    volumes:
-      - loki_data:/loki
-      - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
-    command: -config.file=/etc/loki/local-config.yaml
-
-  promtail:
-    image: grafana/promtail:2.9.4
-    container_name: promtail
-    network_mode: host
-    restart: unless-stopped
-    volumes:
-      - /var/log:/var/log
-      - ./promtail.yaml:/etc/promtail.yaml:ro
-    command: -config.file=/etc/promtail.yaml
-
-  grafana:
-    image: grafana/grafana-enterprise:10.4.2
-    container_name: grafana
-    network_mode: host
-    restart: unless-stopped
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: changeme   # ← change in production
-    volumes:
-      - grafana_data:/var/lib/grafana
+    network_mode: host                     # ← binds :9000 on the VM
+    depends_on: [redis]
+    env_file: [.env]
+    command: >
+      -listen=:9000
+      -redis=127.0.0.1:6379
+      -redis-password=$${REDIS_PASS}
 
 volumes:
-  loki_data:
-  grafana_data:
+  redis_data:
 
-haproxy.cfg:
-###############################################################################
-# FlashProxy – Edge Gateway (HAProxy 2.9)
-#   • External auth via SPOE → sdk.opsec-development.com:9000
-#   • Per-IP 1 Gb/s bandwidth guard
-#   • Bright Data super-proxy backend
-###############################################################################
+# ───── optional: keep secrets out of .env ─────
+# secrets:
+#   redis_pass:
+#     file: ./redis.pass
 
-############################### GLOBAL ########################################
-global
-    log stdout format raw local0
-    master-worker                 # seamless reloads
-    nbthread 2
-    maxconn 200000
+Dockerfile:
+# ───── build stage ─────
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 
-############################### DEFAULTS ######################################
-defaults
-    mode            http
-    timeout connect 5s
-    timeout client  4m
-    timeout server  4m
-    option          dontlognull
+COPY . .
+RUN CGO_ENABLED=0 go build -o /spoa .
 
-############################### SPOE FILTER ###################################
-# Extra file lives at /etc/haproxy/spoe-auth.cfg
-# (see previous message for full contents)
-###############################################################################
+# ───── runtime stage ─────
+FROM alpine:3.20
+RUN addgroup -S spoa && adduser -S spoa -G spoa
+USER spoa
 
-############################### FRONTEND :443 #################################
-frontend edge_in
-    bind :443                                   # add "ssl crt …" once you’re ready
-    mode http
+COPY --from=build /spoa /spoa
+EXPOSE 9000/tcp
+ENTRYPOINT ["/spoa"]
+# default flags can be overridden from docker-compose
+CMD ["-listen=:9000","-redis=redis:6379"]
 
-    # ── per-IP bandwidth cap (1 Gb/s) ────────────────────────────────────────
-    stick-table type ip size 1m expire 1s store bytes_out_rate(1s)
-    tcp-request session track-sc0 src
-    acl  over_quota sc0_bytes_out_rate gt 125000000
-    tcp-request content reject if over_quota
+go.mod:
+module github.com/thealonlevi/fp-prod/flashproxy-infra/flash-auth-agent
 
-    # ── deny if header missing (saves SPOE round-trip) ──────────────────────
-    acl missing_auth req.hdr(Proxy-Authorization) -m len 0
-    http-request deny status 407 realm FlashProxy if missing_auth
+go 1.22
 
-    # ── extract Basic user:pass for SPOE message ────────────────────────────
-    http-request set-var(req.b64)       req.hdr(Proxy-Authorization),field(1,:)
-    http-request set-var(req.username)  var(req.b64),base64,field(1,:)
-    http-request set-var(req.password)  var(req.b64),base64,field(2,:)
+require (
+	github.com/negasus/haproxy-spoe-go v1.0.6 // <─ root module at v1.0.6
+	github.com/redis/go-redis/v9 v9.5.0
+	golang.org/x/crypto v0.18.0
+)
 
-    # ── call auth-engine over SPOE ──────────────────────────────────────────
-    filter spoe engine auth-engine config /etc/haproxy/spoe-auth.cfg
+require (
+	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+)
 
-    # SPOE agent sets txn.auth.auth_ok → 1 on success
-    acl authenticated var(txn.auth.auth_ok) -m int 1
-    http-request deny status 407 realm FlashProxy if !authenticated
+go.sum:
+github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=
+github.com/bsm/ginkgo/v2 v2.12.0/go.mod h1:SwYbGRRDovPVboqFv0tPTcG1sN61LM1Z4ARdbAV9g4c=
+github.com/bsm/gomega v1.27.10 h1:yeMWxP2pV2fG3FgAODIY8EiRE3dy0aeFYt4l7wh6yKA=
+github.com/bsm/gomega v1.27.10/go.mod h1:JyEr/xRbxbtgWNi8tIEVPUYZ5Dzef52k01W3YH0H+O0=
+github.com/cespare/xxhash/v2 v2.2.0 h1:DC2CZ1Ep5Y4k3ZQ899DldepgrayRUGE6BBZ/cd9Cj44=
+github.com/cespare/xxhash/v2 v2.2.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
+github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/rVNCu3HqELle0jiPLLBs70cWOduZpkS1E78=
+github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
+github.com/negasus/haproxy-spoe-go v1.0.6 h1:uJ5coC6n0p4tI0MbVPna4ztFTpW1P3pzswvjuKAF8X4=
+github.com/negasus/haproxy-spoe-go v1.0.6/go.mod h1:ZrBizxtx2EeLN37Jkg9w9g32a1AFCJizA8vg46PaAp4=
+github.com/redis/go-redis/v9 v9.5.0 h1:Xe9TKMmZv939gwTBcvc0n1tzK5l2re0pKw/W/tN3amw=
+github.com/redis/go-redis/v9 v9.5.0/go.mod h1:hdY0cQFCN4fnSYT6TkisLufl/4W5UIXyv0b/CLO2V2M=
+golang.org/x/crypto v0.18.0 h1:PGVlW0xEltQnzFZ55hkuX5+KLyrMYhHld1YHO4AKcdc=
+golang.org/x/crypto v0.18.0/go.mod h1:R0j02AL6hcrfOiy9T4ZYp/rcWeMxM3L6QYxlOuEG1mg=
 
-    # ── copy client header to normal Authorization (optional) ───────────────
-    http-request set-header Authorization %[req.hdr(Proxy-Authorization)]
+main.go:
+package main
 
-    # ── inject Bright Data credentials ──────────────────────────────────────
-    http-request set-header Proxy-Authorization \
-        "Basic YnJkLWN1c3RvbWVyLWhsXzE5Y2IwZmU4LXpvbmUtYWw0LWNvdW50cnktVVMtc2Vzc2lvbi0xMjM0NTY3ODowMzVrbngzM2RtbjI="
+import (
+	"context"
+	"flag"
+	"log"
+	"net"
+	"time"
 
-    default_backend superproxy
+	"github.com/negasus/haproxy-spoe-go/action"
+	"github.com/negasus/haproxy-spoe-go/agent"
+	"github.com/negasus/haproxy-spoe-go/logger"
+	"github.com/negasus/haproxy-spoe-go/request"
+	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/bcrypt"
+)
 
-############################### BACKEND #######################################
-backend superproxy
-    mode http
-    # for TLS to BD: brd.superproxy.io:443 ssl verify none
-    server brd1 brd.superproxy.io:22225
+/* ───── CLI flags ───────────────────────────────────────────────────────── */
 
-    # ── strip BD trace headers before client sees them ──────────────────────
-    http-response del-header X-Luminati-IP
-    http-response del-header X-Luminati-Timeline
-    http-response del-header X-Luminati-Tun-Timeline
-    http-response del-header X-Luminati-P2P-Timeline
-    http-response del-header X-BRD-IP
-    http-response del-header X-BRD-Timeline
-    http-response del-header X-BRD-Tun-Timeline
-    http-response del-header X-BRD-P2P-Timeline
+var (
+	listenAddr   = flag.String("listen", ":9000", "SPOE listen address")
+	redisAddr    = flag.String("redis", "127.0.0.1:6379", "Redis host:port")
+	redisPass    = flag.String("redis-password", "", "Redis AUTH password")
+	redisDB      = flag.Int("redis-db", 0, "Redis DB number")
+	timeoutRedis = flag.Duration("redis-timeout", 500*time.Millisecond, "Redis dial/read timeout")
+)
 
-loki-config.yaml:
-auth_enabled: false
+var (
+	ctx = context.Background()
+	rdb *redis.Client
+)
 
-server:
-  http_listen_port: 3100
-  grpc_listen_port: 9096
-  log_level: info
+/* ───── SPOE message handler ───────────────────────────────────────────── */
 
-analytics:
-  reporting_enabled: false           # opt-out of usage stats
+func authHandler(req *request.Request) {
+	msg, err := req.Messages.GetByName("check_credentials")
+	if err != nil {
+		req.Actions.SetVar(action.ScopeTransaction, "auth_ok", 0)
+		return
+	}
 
-###############################################################################
-# Single-node ring (in-memory) + unified data directory
-###############################################################################
-common:
-  path_prefix: /loki                 # root for all data dirs
-  ring:
-    kvstore:
-      store: inmemory
-  replication_factor: 1
+	usr, ok1 := msg.KV.Get("username")
+	pwd, ok2 := msg.KV.Get("password")
+	if !ok1 || !ok2 {
+		req.Actions.SetVar(action.ScopeTransaction, "auth_ok", 0)
+		return
+	}
 
-###############################################################################
-# Storage
-###############################################################################
-storage_config:
-  boltdb_shipper:
-    active_index_directory: /loki/index
-    cache_location:         /loki/index_cache
-    cache_ttl:              24h
-    shared_store:           filesystem
-  filesystem:
-    directory: /loki/chunks
+	username := usr.(string)
+	password := pwd.(string)
 
-compactor:
-  working_directory: /loki/compactor
-  shared_store:      filesystem
+	hash, err := rdb.HGet(ctx, "user:"+username, "pwd").Result()
+	if err != nil {
+		req.Actions.SetVar(action.ScopeTransaction, "auth_ok", 0)
+		return
+	}
 
-ingester:
-  wal:
-    enabled: true
-    dir: /loki/wal
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil {
+		req.Actions.SetVar(action.ScopeTransaction, "auth_ok", 1)
+	} else {
+		req.Actions.SetVar(action.ScopeTransaction, "auth_ok", 0)
+	}
+}
 
-schema_config:
-  configs:
-    - from: 2023-01-01
-      store: boltdb-shipper
-      object_store: filesystem
-      schema: v11
-      index:
-        prefix: index_
-        period: 24h
+/* ───── main ───────────────────────────────────────────────────────────── */
 
-promtail.yaml:
-# ───── Promtail (self-host, shipping to local Loki) ─────
-server:
-  http_listen_port: 0            # disable Promtail web UI
+func main() {
+	flag.Parse()
 
-positions:
-  filename: /var/log/positions.yaml
+	/* Redis connection */
+	rdb = redis.NewClient(&redis.Options{
+		Addr:        *redisAddr,
+		Password:    *redisPass,
+		DB:          *redisDB,
+		DialTimeout: *timeoutRedis,
+		ReadTimeout: *timeoutRedis,
+	})
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Fatalf("Redis ping failed: %v", err)
+	}
 
-clients:
-  - url: http://localhost:3100/loki/api/v1/push   # <─ local Loki
+	/* TCP listener */
+	listener, err := net.Listen("tcp", *listenAddr)
+	if err != nil {
+		log.Fatalf("listen error: %v", err)
+	}
 
-scrape_configs:
-  - job_name: flash-edge
-    static_configs:
-      - targets: ['localhost']
-        labels:
-          job: flash-edge
-          __path__: /var/log/*proxy*.log          # haproxy.log, 3proxy.log
+	/* SPOE agent */
+	spoeAgent := agent.New(authHandler, logger.NewDefaultLog())
+	log.Printf("spoe-auth-agent listening on %s", *listenAddr)
 
-spoe-auth.cfg:
-###############################################################################
-# SPOE agent definition – FlashProxy edge
-# The auth-agent is running on a separate VM:
-#   sdk.opsec-development.com :9000
-###############################################################################
-
-[spoe-agent auth-engine]
-  timeout hello 3s
-  timeout idle  30s
-  messages      check_credentials
-  option        var-prefix auth
-
-  # ── remote agent(s) ───────────────────────────────────────────────────────
-  server auth1 sdk.opsec-development.com:9000
-
-[spoe-message check_credentials]
-  # These vars are set in haproxy.cfg:
-  #   req.username  – decoded Basic username
-  #   req.password  – decoded Basic password
-  args username=var(req.username) password=var(req.password)
+	if err := spoeAgent.Serve(listener); err != nil {
+		log.Fatalf("agent serve error: %v", err)
+	}
+}
 
