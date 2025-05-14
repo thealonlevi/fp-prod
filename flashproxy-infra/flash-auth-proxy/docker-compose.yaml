@@ -5,21 +5,19 @@ services:
     image: redis:7.2-alpine
     network_mode: host
     command: ["redis-server","--appendonly","yes","--requirepass","${REDIS_PASS}"]
-    volumes: [ "redis_data:/data" ]
-    env_file: [ .env ]
+    volumes: ["redis_data:/data"]
+    env_file: [.env]
 
   auth-proxy:
-    build: ../flash-auth-proxy
-    network_mode: host
+    build: ../flash-auth-proxy          # path to the Dockerfile
+    network_mode: host                  # listens on :443
     depends_on: [redis]
-    env_file: [.env]          # REDIS_PASS is defined here
+    env_file: [.env]                    # injects REDIS_PASS env var
     command:
       - -listen=:443
       - -backend=127.0.0.1:8443
       - -redis=127.0.0.1:6379
-      - -redis-password=${REDIS_PASS}   # ← NEW
-      - -max-gbps=1
-
+      - -max-gbps=1                    # password picked up from env
 
 volumes:
   redis_data:
