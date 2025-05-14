@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    network_mode: host
+    command: ["redis-server","--appendonly","yes","--requirepass","${REDIS_PASS}"]
+    volumes: [ "redis_data:/data" ]
+    env_file: [ .env ]
+
+  auth-proxy:
+    build: ../flash-auth-proxy
+    network_mode: host          # → listens on :443
+    depends_on: [redis]
+    env_file: [ .env ]
+    command:
+      - -listen=:443
+      - -backend=127.0.0.1:8443
+      - -redis=127.0.0.1:6379
+      - -redis-password=${REDIS_PASS}
+      - -max-gbps=1
+
+volumes:
+  redis_data:
