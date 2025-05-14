@@ -6,13 +6,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/textproto"
 	"os"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -25,12 +25,11 @@ var (
 	listen   = flag.String("listen", ":443", "Public listen address")
 	backend  = flag.String("backend", "127.0.0.1:8443", "HAProxy address")
 	redisURL = flag.String("redis", "127.0.0.1:6379", "Redis host:port")
-	// default to $REDIS_PASS so the flag is optional
 	redisPwd = flag.String("redis-password", os.Getenv("REDIS_PASS"), "Redis AUTH password")
 	maxGbps  = flag.Float64("max-gbps", 1, "Per-user bandwidth cap (Gb/s)")
 )
 
-/* ───── global vars initialised in main() ───────────────────── */
+/* ───── globals initialised in main() ──────────────────────── */
 var (
 	ctx context.Context
 	rdb *redis.Client
@@ -63,14 +62,14 @@ func passwdOK(user, pass string) bool {
 
 /* ───── per-connection handler ─────────────────────────────── */
 
-func handleConn(br net.Conn) {
-	defer br.Close()
-	tp := textproto.NewReader(bufio.NewReader(br))
+func handleConn(cli net.Conn) {
+	defer cli.Close()
+	tp := textproto.NewReader(bufio.NewReader(cli))
 
-	// ① CONNECT line
-	first, err := tp.ReadLine()
-	if err != nil || !strings.HasPrefix(first, "CONNECT ") {
-		io.WriteString(br, "HTTP/1.1 400 Bad Request\r\n\r\n")
+	// ① CONNECT line from client
+	reqLine, err := tp.ReadLine()
+	if err != nil || !strings.HasPrefix(reqLine, "CONNECT ") {
+		io.WriteString(cli, "HTTP/1.1 400 Bad Request\r\n\r\n")
 		return
 	}
 
@@ -86,42 +85,61 @@ func handleConn(br net.Conn) {
 		}
 	}
 	if authHdr == "" {
-		io.WriteString(br, "HTTP/1.1 407 Proxy Authentication Required\r\n"+
+		io.WriteString(cli, "HTTP/1.1 407 Proxy Authentication Required\r\n"+
 			"Proxy-Authenticate: Basic realm=\"FlashProxy\"\r\n\r\n")
 		return
 	}
 	user, pass, err := parseBasicAuth(authHdr)
 	if err != nil || !passwdOK(user, pass) {
-		io.WriteString(br, "HTTP/1.1 407 Proxy Authentication Required\r\n"+
+		io.WriteString(cli, "HTTP/1.1 407 Proxy Authentication Required\r\n"+
 			"Proxy-Authenticate: Basic realm=\"FlashProxy\"\r\n\r\n")
 		return
 	}
 
-	// ③ per-user 1-second bandwidth window
-	limitBytes := int64(*maxGbps * 125_000_000) // Gb/s → bytes
+	// ③ per-user bandwidth window (1 s)
+	limitBytes := int64(*maxGbps * 125_000_000)
 	bwKey := "bw:" + user
 
-	// ④ dial HAProxy
+	// ④ dial downstream (HAProxy)
 	ds, err := net.Dial("tcp", *backend)
 	if err != nil {
-		io.WriteString(br, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+		io.WriteString(cli, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
 	defer ds.Close()
 
-	io.WriteString(br, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	/* ⑤ send a fresh CONNECT with Bright Data creds */
+	fmt.Fprintf(ds, "%s\r\n", reqLine)
+	fmt.Fprint(ds, "Proxy-Authorization: Basic "+
+		"YnJkLWN1c3RvbWVyLWhsXzE5Y2IwZmU4LXpvbmUtYWw0LWNvdW50cnktVVMtc2Vzc2lvbi0xMjM0NTY3ODowMzVrbngzM2RtbjI=\r\n\r\n")
 
-	// ⑤ bidirectional copy + quota
-	copyCount := func(dst, src net.Conn, counter *int64) {
+	/* read 1-line response from downstream and relay to client */
+	dsResp := bufio.NewReader(ds)
+	status, _ := dsResp.ReadString('\n')
+	if !strings.HasPrefix(status, "HTTP/1.1 200") {
+		cli.Write([]byte(status))
+		io.Copy(cli, dsResp)
+		return
+	}
+	// consume rest of downstream headers
+	for {
+		line, _ := dsResp.ReadString('\n')
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+	cli.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+
+	// ⑥ bidirectional copy with quota
+	pipe := func(dst, src net.Conn, key string) {
 		buf := make([]byte, 64*1024)
 		for {
 			n, err := src.Read(buf)
 			if n > 0 {
-				atomic.AddInt64(counter, int64(n))
-				if v := rdb.IncrBy(ctx, bwKey, int64(n)).Val(); v > limitBytes {
-					rdb.Expire(ctx, bwKey, time.Second)
-					br.Close()
-					ds.Close()
+				if v := rdb.IncrBy(ctx, key, int64(n)).Val(); v > limitBytes {
+					rdb.Expire(ctx, key, time.Second)
+					dst.Close()
+					src.Close()
 					return
 				}
 				dst.Write(buf[:n])
@@ -131,9 +149,8 @@ func handleConn(br net.Conn) {
 			}
 		}
 	}
-
-	go copyCount(ds, br, new(int64)) // upstream
-	copyCount(br, ds, new(int64))    // downstream
+	go pipe(ds, cli, bwKey) // upstream
+	pipe(cli, ds, bwKey)    // downstream
 }
 
 /* ───── main ───────────────────────────────────────────────── */
